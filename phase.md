@@ -167,9 +167,19 @@ dorean/
 - [ ] golden screen snapshots via `vt100`
 - [ ] resize + SIGWINCH handling tests
 - [ ] fuzz-ish: malformed SSE, huge output, abort mid-stream
-- [ ] install path: `cargo install --path .`
+- [x] install path superseded by the cargo-dist release pipeline (Phase 9) — local binary verified via packaged archive
 
 **Exit:** CI green, stable on real tasks.
+
+### Phase 9 — Distribution
+- [x] `cargo-dist` pipeline: `dist-workspace.toml` (targets `x86_64` + `aarch64`-unknown-linux-gnu, `install-path = CARGO_HOME`), generated `.github/workflows/release.yml` (tag-push trigger, `pr-run-mode = "plan"`)
+- [x] shell installer (`dorean-installer.sh`) → `~/.cargo/bin` + PATH via `.profile`; self-updater binary (`dorean-update`, `install-updater = true`)
+- [x] `repository` field in `Cargo.toml`, `[profile.dist]` (inherits release, thin LTO)
+- [x] `CHANGELOG.md` (Unreleased → auto GitHub Release notes); README "Install" section (curl one-liner + manual archive)
+- [x] local verification: `cargo dist build` produced working `dorean` archive + installer (binary runs, `dorean 0.1.0`); 190 tests / clippy `-D warnings` / fmt green
+- [ ] cut `v0.1.0`: `git push && git tag v0.1.0 && git push --tags` → CI builds both Linux arches, publishes the GitHub Release
+
+**Exit:** `curl ... dorean-installer.sh | sh` installs dorean on any Linux x86_64/ARM64.
 
 ## Milestones
 - **M0** scaffold+config (Phase 0) ✅
@@ -178,6 +188,7 @@ dorean/
 - **M3** sub-agent orchestration: parallel multi-agent build + @mention routing (Phase 5) ✅
 - **M4** chat TUI live (Phase 6) ✅
 - **M5** selectors/polish + hardening (Phases 7–8)
+- **M6** distribution: cargo-dist release pipeline (Phase 9) ✅ (release cut pending)
 
 ## Not in scope (phase 0 decisions)
 - Windows / macOS terminal handling

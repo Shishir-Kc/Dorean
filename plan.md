@@ -3,8 +3,9 @@
 Status: **Live** — stack decision made and executed. **Rust**, single crate `dorean`, Linux-first,
 hand-rolled diffed renderer on `crossterm` (no ratatui), OpenRouter free models, and a from-scratch
 agent harness (no pi/opencode code). Phases 0–6 are complete (the chat TUI ships); Phases 7–8 are in
-progress. The checkboxes below track the original target inventory against what actually ships today,
-and `phase.md` is the authoritative task list.
+progress; Phase 9 (distribution via cargo-dist) is set up and verified locally. The checkboxes below
+track the original target inventory against what actually ships today, and `phase.md` is the
+authoritative task list.
 Deliverable: a `plan.md` + `phase.md` that a coding agent executed to reproduce the TUI experience.
 
 ---
@@ -199,5 +200,7 @@ Project artifacts the orchestration layer reads/writes (in the working repo):
 
 ## 7. Next Actions (current state — see `phase.md`)
 1. **Done:** stack decision, scaffold, terminal core, widgets, chat layout/event loop, real harness integration (Phases 0–3) — the TUI ships and is fully tested.
-2. **Doing:** Phase 7 polish — remaining slash commands (`/copy /permission /theme /sessions /regenerate`), session/theme/settings selectors, regenerate, clipboard copy, provider status hint.
-3. **Then:** Phase 8 hardening — golden `vt100` screen snapshots, resize/SIGWINCH tests, fuzz-ish malformed-SSE/huge-output/abort tests, `cargo install --path .`.
+2. **Done:** distribution — cargo-dist pipeline (Linux x86_64 + ARM64, shell installer + self-updater), `CHANGELOG.md`, README install docs; verified locally (Phase 9).
+3. **Doing:** Phase 7 polish — remaining slash commands (`/copy /permission /theme /sessions /regenerate`), session/theme/settings selectors, regenerate, clipboard copy, provider status hint.
+4. **Then:** Phase 8 hardening — golden `vt100` screen snapshots, resize/SIGWINCH tests, fuzz-ish malformed-SSE/huge-output/abort tests.
+5. **Then:** cut the `v0.1.0` GitHub Release (`git push --tags` triggers the cargo-dist pipeline).
