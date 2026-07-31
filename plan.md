@@ -203,4 +203,4 @@ Project artifacts the orchestration layer reads/writes (in the working repo):
 2. **Done:** distribution — cargo-dist pipeline (Linux x86_64 + ARM64, shell installer + self-updater), `CHANGELOG.md`, README install docs; verified locally (Phase 9).
 3. **Doing:** Phase 7 polish — remaining slash commands (`/copy /permission /theme /sessions /regenerate`), session/theme/settings selectors, regenerate, clipboard copy, provider status hint.
 4. **Then:** Phase 8 hardening — golden `vt100` screen snapshots, resize/SIGWINCH tests, fuzz-ish malformed-SSE/huge-output/abort tests.
-5. **Then:** cut `v0.1.0` GitHub Release. **Done:** v0.1.0 released (tag → cargo-dist pipeline built both arches). Next cut is `v0.1.1` (NVIDIA provider): bump `Cargo.toml` to 0.1.1, add `## [0.1.1]` Keep-a-Changelog section, then tag `v0.1.1` at the release commit.
+5. **Then:** cut `v0.1.0` GitHub Release. **Done:** v0.1.0 released, and `v0.1.1` (NVIDIA provider) cut — `Cargo.toml` 0.1.1, Keep-a-Changelog `[0.1.1]`, tag at the release commit.

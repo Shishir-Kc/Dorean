@@ -180,7 +180,7 @@ dorean/
 - [x] `CHANGELOG.md` (Keep-a-Changelog: `[Unreleased]` + `[0.1.0]` sections → auto GitHub Release notes); README "Install" section (curl one-liner + manual archive)
 - [x] local verification: `cargo dist build` produced working `dorean` archive + installer (binary runs, `dorean 0.1.0`); 190 tests / clippy `-D warnings` / fmt green
 - [x] cut `v0.1.0`: tag pushed → CI built both Linux arches, GitHub Release published
-- [ ] cut `v0.1.1`: NVIDIA provider release — bump `Cargo.toml` to 0.1.1, `## [0.1.1]` changelog section, `git tag v0.1.1` at the release commit (the tagged commit's `Cargo.toml` must match the tag version or `dist host --steps=create` refuses)
+- [x] cut `v0.1.1`: NVIDIA provider release — bump `Cargo.toml` to 0.1.1, `## [0.1.1]` changelog section, `git tag v0.1.1` at the release commit (the tagged commit's `Cargo.toml` must match the tag version or `dist host --steps=create` refuses)
 
 **Exit:** `curl ... dorean-installer.sh | sh` installs dorean on any Linux x86_64/ARM64.
 
@@ -191,7 +191,7 @@ dorean/
 - **M3** sub-agent orchestration: parallel multi-agent build + @mention routing (Phase 5) ✅
 - **M4** chat TUI live (Phase 6) ✅
 - **M5** selectors/polish + hardening (Phases 7–8)
-- **M6** distribution: cargo-dist release pipeline (Phase 9) ✅ (v0.1.0 released; v0.1.1 cut pending)
+- **M6** distribution: cargo-dist release pipeline (Phase 9) ✅ (v0.1.0 and v0.1.1 released)
 
 ## Not in scope (phase 0 decisions)
 - Windows / macOS terminal handling
