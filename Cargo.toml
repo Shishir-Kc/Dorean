@@ -3,6 +3,7 @@ name = "dorean"
 version = "0.1.0"
 edition = "2024"
 description = "A pi/opencode-style coding agent for the terminal"
+repository = "https://github.com/Shishir-Kc/Dorean"
 license = "MIT"
 
 [dependencies]
@@ -29,3 +30,8 @@ wiremock = "0.6"
 [profile.release]
 lto = true
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

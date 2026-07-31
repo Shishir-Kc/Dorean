@@ -5,6 +5,18 @@ for Linux. Chat TUI + non-interactive CLI, driven by OpenRouter's free tier.
 
 Status: Phase 3 (harness core — agent loop + tools). See `phase.md` for the roadmap.
 
+## Install
+
+Linux (x86_64 or ARM64):
+
+```
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Shishir-Kc/Dorean/releases/latest/download/dorean-installer.sh | sh
+```
+
+Or grab the `dorean-<arch>-unknown-linux-gnu.tar.xz` archive from the latest
+[GitHub Release](https://github.com/Shishir-Kc/Dorean/releases/latest) and add
+the binary to your `PATH`.
+
 ## Build & test
 
 ```
