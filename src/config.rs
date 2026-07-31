@@ -8,12 +8,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::DoreanError;
 use crate::permissions::PermissionMode;
 
-/// Which provider layer to talk to. OpenRouter is the only provider today.
+/// Which provider layer to talk to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     #[default]
     OpenRouter,
+    Nvidia,
 }
 
 impl FromStr for Provider {
@@ -22,8 +23,9 @@ impl FromStr for Provider {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
             "openrouter" => Ok(Provider::OpenRouter),
+            "nvidia" => Ok(Provider::Nvidia),
             other => Err(DoreanError::Config(format!(
-                "unknown provider `{other}` (expected `openrouter`)"
+                "unknown provider `{other}` (expected `openrouter` or `nvidia`)"
             ))),
         }
     }
@@ -31,7 +33,10 @@ impl FromStr for Provider {
 
 impl fmt::Display for Provider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("openrouter")
+        f.write_str(match self {
+            Provider::OpenRouter => "openrouter",
+            Provider::Nvidia => "nvidia",
+        })
     }
 }
 
@@ -44,6 +49,7 @@ pub struct Config {
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub openrouter_api_key: Option<String>,
+    pub nvidia_api_key: Option<String>,
     pub telemetry: bool,
     pub theme: Option<String>,
     pub max_tokens: Option<u32>,
@@ -69,6 +75,7 @@ impl Default for Config {
             model: None,
             base_url: None,
             openrouter_api_key: None,
+            nvidia_api_key: None,
             telemetry: true,
             theme: None,
             max_tokens: None,
@@ -149,6 +156,9 @@ impl Config {
         }
         if let Ok(value) = std::env::var("DOREAN_OPENROUTER_API_KEY") {
             self.openrouter_api_key = Some(value);
+        }
+        if let Ok(value) = std::env::var("DOREAN_NVIDIA_API_KEY") {
+            self.nvidia_api_key = Some(value);
         }
         if let Ok(value) = std::env::var("DOREAN_TELEMETRY") {
             self.telemetry = matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
@@ -294,8 +304,25 @@ mod tests {
             "OpenRouter".parse::<Provider>().unwrap(),
             Provider::OpenRouter
         );
+        assert_eq!("nvidia".parse::<Provider>().unwrap(), Provider::Nvidia);
+        assert_eq!("NVIDIA".parse::<Provider>().unwrap(), Provider::Nvidia);
         assert!("ollama".parse::<Provider>().is_err());
         assert!("bogus".parse::<Provider>().is_err());
+    }
+
+    #[test]
+    fn provider_displays_lowercase() {
+        assert_eq!(Provider::OpenRouter.to_string(), "openrouter");
+        assert_eq!(Provider::Nvidia.to_string(), "nvidia");
+    }
+
+    #[test]
+    fn env_sets_nvidia_key() {
+        unsafe {
+            std::env::set_var("DOREAN_NVIDIA_API_KEY", "nvapi-test");
+        }
+        let cfg = Config::default().apply_env();
+        assert_eq!(cfg.nvidia_api_key.as_deref(), Some("nvapi-test"));
     }
 
     #[test]

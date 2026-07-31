@@ -19,7 +19,7 @@ use crate::permissions::PermissionPolicy;
 use crate::providers::client::{
     ChatRequest, CompletionEvent, Message, ToolCall, ToolCallDelta, Usage, accumulate_tool_calls,
 };
-use crate::providers::{DEFAULT_FREE_MODEL, OpenRouterProvider};
+use crate::providers::{AnyProvider, default_model};
 
 /// Handle for requesting a graceful stop of the agent loop. Checked between
 /// turns and between stream events, so an abort takes effect promptly.
@@ -72,7 +72,7 @@ pub struct AgentIdentity {
 /// which is rebuilt per request to reflect current tools) and the tool set.
 pub struct AgentLoop {
     config: Config,
-    provider: OpenRouterProvider,
+    provider: AnyProvider,
     cwd: PathBuf,
     repo: RepoContext,
     tools: ToolRegistry,
@@ -129,7 +129,7 @@ impl AgentLoop {
         permissions: PermissionPolicy,
     ) -> Result<Self, DoreanError> {
         Ok(AgentLoop {
-            provider: OpenRouterProvider::from_config(config)?,
+            provider: AnyProvider::from_config(config)?,
             config: config.clone(),
             cwd: cwd.to_path_buf(),
             repo: RepoContext::snapshot(cwd),
@@ -188,12 +188,12 @@ impl AgentLoop {
         self.tools.register(tool);
     }
 
-    /// The configured model id, the override, or the default free model.
+    /// The configured model id, the override, or the provider's default.
     pub fn model(&self) -> String {
         self.model_override
             .clone()
             .or_else(|| self.config.model.clone())
-            .unwrap_or_else(|| DEFAULT_FREE_MODEL.to_string())
+            .unwrap_or_else(|| default_model(self.config.provider).to_string())
     }
 
     /// Restore a prior conversation (for `--continue`).

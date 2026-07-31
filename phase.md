@@ -8,7 +8,7 @@ everything is new.
 - **Language:** Rust (edition 2021+, single crate workspace: `dorean`)
 - **Platform:** Linux-only (POSIX `/dev/tty`, crossterm raw mode, `SIGWINCH`)
 - **Models:** one OpenAI-compatible client
-  - **Hosted free:** OpenRouter free tier (`openrouter/free`, `:free` models)
+  - **Hosted free:** OpenRouter free tier (`openrouter/free`, `:free` models) + NVIDIA hosted NIM (build.nvidia.com, `NVIDIA_API_KEY`)
 - **UI:** chat TUI + non-interactive CLI mode
 - **Key deps (subject to change):** `crossterm`, `tokio`, `serde`, `serde_json`,
   `reqwest` (streaming SSE), `clap`, `rayon` (search parallel), `syntect` or `tree-sitter` (highlighting)
@@ -80,11 +80,13 @@ dorean/
 - [x] `providers/client.rs`: OpenAI-compatible `/v1/chat/completions` with `stream: true`
 - [x] SSE frame parser (`data:`, `[DONE]`, error frames)
 - [x] `openrouter.rs`: `:free` models list, key from config/env
+- [x] `nvidia.rs`: hosted NIM adapter — `https://integrate.api.nvidia.com/v1`, key from config/`NVIDIA_API_KEY`, OpenAI-shaped `GET /models` (whole catalog free), default `nvidia/nemotron-3-ultra-550b-a55b`
+- [x] `AnyProvider` dispatcher (`providers/mod.rs`): `from_config` / `for_model_listing` / provider-aware default model; `--provider nvidia`, `/key` + model selector are provider-aware
 - [x] `Provider::list_models()` grouped: Free (OpenRouter) — `list_models()`/`list_free_models()` on OpenRouterProvider
 - [x] streaming progress: token count, partial content callbacks
 - [x] tool-call message support in client (tool calls round-trip): `delta.tool_calls` streaming parsed; `ToolCallDelta` accumulated by index into OpenAI-shaped `tool_calls`; assistant/tool messages round-trip
 
-**Exit:** can stream a full response from OpenRouter free. (Done: `dorean -m "hi" -p` streams live, verified against the real API. Ollama removed — OpenRouter only.)
+**Exit:** can stream a full response from OpenRouter free. (Done: `dorean -m "hi" -p` streams live, verified against the real API. Ollama removed — OpenRouter only. NVIDIA verified via mock-server integration tests in `tests/nvidia.rs` and live: `GET /v1/models` on `integrate.api.nvidia.com` returns the full free catalog — 102 models — without a key.)
 
 ### Phase 3 — Harness core (agent loop)
 - [x] `agent_loop.rs`: the loop — user msg → model → tool_calls → execute → observe → repeat
@@ -175,9 +177,10 @@ dorean/
 - [x] `cargo-dist` pipeline: `dist-workspace.toml` (targets `x86_64` + `aarch64`-unknown-linux-gnu, `install-path = CARGO_HOME`), generated `.github/workflows/release.yml` (tag-push trigger, `pr-run-mode = "plan"`)
 - [x] shell installer (`dorean-installer.sh`) → `~/.cargo/bin` + PATH via `.profile`; self-updater binary (`dorean-update`, `install-updater = true`)
 - [x] `repository` field in `Cargo.toml`, `[profile.dist]` (inherits release, thin LTO)
-- [x] `CHANGELOG.md` (Unreleased → auto GitHub Release notes); README "Install" section (curl one-liner + manual archive)
+- [x] `CHANGELOG.md` (Keep-a-Changelog: `[Unreleased]` + `[0.1.0]` sections → auto GitHub Release notes); README "Install" section (curl one-liner + manual archive)
 - [x] local verification: `cargo dist build` produced working `dorean` archive + installer (binary runs, `dorean 0.1.0`); 190 tests / clippy `-D warnings` / fmt green
-- [ ] cut `v0.1.0`: `git push && git tag v0.1.0 && git push --tags` → CI builds both Linux arches, publishes the GitHub Release
+- [x] cut `v0.1.0`: tag pushed → CI built both Linux arches, GitHub Release published
+- [ ] cut `v0.1.1`: NVIDIA provider release — bump `Cargo.toml` to 0.1.1, `## [0.1.1]` changelog section, `git tag v0.1.1` at the release commit (the tagged commit's `Cargo.toml` must match the tag version or `dist host --steps=create` refuses)
 
 **Exit:** `curl ... dorean-installer.sh | sh` installs dorean on any Linux x86_64/ARM64.
 
@@ -188,7 +191,7 @@ dorean/
 - **M3** sub-agent orchestration: parallel multi-agent build + @mention routing (Phase 5) ✅
 - **M4** chat TUI live (Phase 6) ✅
 - **M5** selectors/polish + hardening (Phases 7–8)
-- **M6** distribution: cargo-dist release pipeline (Phase 9) ✅ (release cut pending)
+- **M6** distribution: cargo-dist release pipeline (Phase 9) ✅ (v0.1.0 released; v0.1.1 cut pending)
 
 ## Not in scope (phase 0 decisions)
 - Windows / macOS terminal handling

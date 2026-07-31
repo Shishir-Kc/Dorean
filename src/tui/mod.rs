@@ -41,7 +41,7 @@ pub enum SessionCmd {
     Abort,
     /// Fetch the free model list for the model selector.
     FetchModels,
-    /// Persist a new OpenRouter API key and rebuild the agent with it.
+    /// Persist a new API key (for the active provider) and rebuild the agent.
     SetApiKey(String),
     /// Stop the background task.
     Shutdown,
@@ -199,7 +199,12 @@ fn spawn_agent_task(
                     abort.abort();
                 }
                 SessionCmd::SetApiKey(key) => {
-                    config.openrouter_api_key = Some(key);
+                    match config.provider {
+                        crate::config::Provider::OpenRouter => {
+                            config.openrouter_api_key = Some(key.clone())
+                        }
+                        crate::config::Provider::Nvidia => config.nvidia_api_key = Some(key),
+                    }
                     match crate::agent::AgentLoop::with_cwd_and_ask(&config, &cwd, approve.clone())
                     {
                         Ok(fresh) => {
@@ -213,9 +218,10 @@ fn spawn_agent_task(
                     }
                 }
                 SessionCmd::FetchModels => {
-                    // /models is public: list free models even without a key,
-                    // so /model always works. Chat itself still needs /key.
-                    let provider = crate::providers::OpenRouterProvider::for_model_listing(&config);
+                    // Model listing works even without a key on OpenRouter, and
+                    // is attempted keyless on NVIDIA too, so /model always
+                    // opens. Chat itself still needs /key.
+                    let provider = crate::providers::AnyProvider::for_model_listing(&config);
                     match provider.list_free_models().await {
                         Ok(models) => {
                             let _ = events_tx.send(TuiEvent::ModelList(models));

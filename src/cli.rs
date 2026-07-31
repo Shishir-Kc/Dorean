@@ -21,7 +21,7 @@ pub struct Cli {
     #[arg(short = 'c', long = "continue")]
     pub resume: bool,
 
-    /// Override the provider from config (`openrouter`).
+    /// Override the provider from config (`openrouter` | `nvidia`).
     #[arg(long = "provider", value_name = "PROVIDER")]
     pub provider: Option<Provider>,
 

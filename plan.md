@@ -1,11 +1,11 @@
 # Plan: Build a pi-style Chat TUI (Rust)
 
 Status: **Live** — stack decision made and executed. **Rust**, single crate `dorean`, Linux-first,
-hand-rolled diffed renderer on `crossterm` (no ratatui), OpenRouter free models, and a from-scratch
-agent harness (no pi/opencode code). Phases 0–6 are complete (the chat TUI ships); Phases 7–8 are in
-progress; Phase 9 (distribution via cargo-dist) is set up and verified locally. The checkboxes below
-track the original target inventory against what actually ships today, and `phase.md` is the
-authoritative task list.
+hand-rolled diffed renderer on `crossterm` (no ratatui), **OpenRouter free + NVIDIA hosted NIM** models,
+and a from-scratch agent harness (no pi/opencode code). Phases 0–6 are complete (the chat TUI ships);
+Phases 7–8 are in progress; Phase 9 (distribution via cargo-dist) is set up and verified locally. The
+checkboxes below track the original target inventory against what actually ships today, and `phase.md`
+is the authoritative task list.
 Deliverable: a `plan.md` + `phase.md` that a coding agent executed to reproduce the TUI experience.
 
 ---
@@ -82,7 +82,7 @@ Core loop in `interactive-mode.ts`:
 - [x] Clipboard paste (bracketed paste)
 
 ### Overlays / selectors (Esc or /command opens these)
-- [x] Model selector (grouped Free/OpenRouter, type-to-filter)
+- [x] Model selector (grouped Free/OpenRouter, type-to-filter; also lists the whole free NVIDIA catalog)
 - [x] Trust/tool-approval selector (allow/ask/deny, deny-list)
 - [x] Stack selector (orchestration stack prompt)
 - [ ] Session selector (resume via `--continue` only)
@@ -192,7 +192,7 @@ Project artifacts the orchestration layer reads/writes (in the working repo):
 ## 6. Decisions Made (previously open questions)
 1. **Go or Rust?** → **Rust**, single crate `dorean`. (Renderer is hand-rolled, so no ratatui dependency.)
 2. **Reuse a widget library or hand-roll?** → **Hand-rolled** `Screen` buffer + incremental diff flush, like pi. Full control over streaming/virtualized rendering.
-3. **Which AI backend?** → **Own Rust harness** (agent loop + tools + orchestration) driving **OpenRouter free** models via one OpenAI-compatible client.
+3. **Which AI backend?** → **Own Rust harness** (agent loop + tools + orchestration) driving **OpenRouter free** and **NVIDIA hosted NIM** (build.nvidia.com, `NVIDIA_API_KEY`) models via one OpenAI-compatible client.
 4. **macOS/Windows?** → **Linux-first**; no native modifier support for other platforms in v1.
 5. **Modal overlays or full-screen dialogs?** → **Modal overlays** that swap the area above the input, pi-style.
 
@@ -203,4 +203,4 @@ Project artifacts the orchestration layer reads/writes (in the working repo):
 2. **Done:** distribution — cargo-dist pipeline (Linux x86_64 + ARM64, shell installer + self-updater), `CHANGELOG.md`, README install docs; verified locally (Phase 9).
 3. **Doing:** Phase 7 polish — remaining slash commands (`/copy /permission /theme /sessions /regenerate`), session/theme/settings selectors, regenerate, clipboard copy, provider status hint.
 4. **Then:** Phase 8 hardening — golden `vt100` screen snapshots, resize/SIGWINCH tests, fuzz-ish malformed-SSE/huge-output/abort tests.
-5. **Then:** cut the `v0.1.0` GitHub Release (`git push --tags` triggers the cargo-dist pipeline).
+5. **Then:** cut `v0.1.0` GitHub Release. **Done:** v0.1.0 released (tag → cargo-dist pipeline built both arches). Next cut is `v0.1.1` (NVIDIA provider): bump `Cargo.toml` to 0.1.1, add `## [0.1.1]` Keep-a-Changelog section, then tag `v0.1.1` at the release commit.

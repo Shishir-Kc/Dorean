@@ -13,10 +13,10 @@ use crate::agent::events::{AgentEvent, StreamEvent};
 use crate::agent::manifest::AgentManifest;
 use crate::agent::stack::STACKS;
 use crate::agent::todos::TodoStatus;
-use crate::config::Config;
+use crate::config::{Config, Provider};
 use crate::error::DoreanError;
-use crate::providers::DEFAULT_FREE_MODEL;
 use crate::providers::client::Usage;
+use crate::providers::default_model;
 
 use super::SessionCmd;
 use super::components::message::draw_md_line;
@@ -138,7 +138,7 @@ impl App {
             model: config
                 .model
                 .clone()
-                .unwrap_or_else(|| DEFAULT_FREE_MODEL.to_string()),
+                .unwrap_or_else(|| default_model(config.provider).to_string()),
             roster: Vec::new(),
             agent_status: HashMap::new(),
             todos: Vec::new(),
@@ -446,11 +446,22 @@ impl App {
         if key.is_empty() {
             return;
         }
-        self.config.openrouter_api_key = Some(key);
+        match self.config.provider {
+            crate::config::Provider::OpenRouter => {
+                self.config.openrouter_api_key = Some(key);
+            }
+            crate::config::Provider::Nvidia => {
+                self.config.nvidia_api_key = Some(key);
+            }
+        }
         if let Err(e) = self.config.save() {
             self.toast(format!("failed to save config: {e}"), ToastKind::Error);
         }
-        let key = self.config.openrouter_api_key.clone().unwrap_or_default();
+        let key = match self.config.provider {
+            crate::config::Provider::OpenRouter => self.config.openrouter_api_key.clone(),
+            crate::config::Provider::Nvidia => self.config.nvidia_api_key.clone(),
+        }
+        .unwrap_or_default();
         let _ = self.cmd_tx.send(SessionCmd::SetApiKey(key));
         self.overlay = Some(Overlay::Loading("fetching free models…".to_string()));
         let _ = self.cmd_tx.send(SessionCmd::FetchModels);
@@ -1345,7 +1356,7 @@ impl App {
                 self.overlay = Some(Overlay::AgentModels { selected });
             }
             Overlay::ApiKey { input } => {
-                Self::draw_api_key(screen, &theme, width, height, &input);
+                Self::draw_api_key(screen, &theme, width, height, &input, self.config.provider);
                 self.overlay = Some(Overlay::ApiKey { input });
             }
             Overlay::Permission { prompt, reply } => {
@@ -1442,17 +1453,21 @@ impl App {
         }
     }
 
-    fn draw_api_key(screen: &mut Screen, theme: &Theme, width: usize, height: usize, input: &str) {
+    fn draw_api_key(
+        screen: &mut Screen,
+        theme: &Theme,
+        width: usize,
+        height: usize,
+        input: &str,
+        provider: Provider,
+    ) {
         let (bx, by, bw, _bh) = centered_box(width, height, 58, 7);
         screen.box_border(bx, by, bw, 7, theme);
-        screen.put_str(
-            bx + 2,
-            by,
-            " openrouter api key",
-            theme.accent,
-            theme.bg,
-            Attrs::bold(),
-        );
+        let label = match provider {
+            Provider::OpenRouter => " openrouter api key",
+            Provider::Nvidia => " nvidia api key",
+        };
+        screen.put_str(bx + 2, by, label, theme.accent, theme.bg, Attrs::bold());
         screen.put_str(
             bx + 2,
             by + 2,
