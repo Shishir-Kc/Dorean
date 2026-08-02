@@ -1,0 +1,24 @@
+ openro┌─ dorean help───────────────────────────────────────────────────┐ idle
+       │                                                                │
+       │ ⏎                       send · ctrl+j / shift+⏎ newline        │
+       │ esc                     abort run (esc twice) · close overl…   │
+       │ ctrl+c                  quit                                   │
+       │ ctrl+u                  clear input · ctrl+w delete word       │
+       │ ctrl+z/y                undo / redo input edits                │
+       │ ctrl+e                  edit input in $EDITOR                  │
+       │ ↑/↓                     history or cursor · select in menus    │
+       │ pgup/pgdn               scroll the chat                        │
+       │ tab                     complete @agent mention                │
+       │ /model                  switch model                           │
+       │ /key                    set api key                            │
+       │ /permission             allow / ask / deny tool approval       │
+       │ /theme                  auto · light · dark · JSON themes      │
+       │ /sessions               resume a saved session                 │
+       │ /copy                   copy last reply (all = whole chat)     │
+       │ /regenerate             replay the last message                │
+       │ /make <goal>            parallel sub-agent build (+ model p…   │
+       │ /thinking               show / hide the reasoning block        │
+       │ /todo /spec             todo panel · plan view                 │
+───────│─/clear /quit────────────reset chat · leave─────────────────────│───────
+  ype a│message · /make <goal> · /help                                  │
+ ⏎ send└────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,24 @@
+ m1  ·  openrouter ⚠ no key (/key)                                      ○ idle
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ype a message · /make <goal> · /help
+ ⏎ send · ctrl+j newline · esc esc abort · pgup/pgdn scroll · /help

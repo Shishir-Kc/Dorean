@@ -1,0 +1,24 @@
+ m1  ·  openrouter ⚠ no key (/key)                                   ◐ running
+                                                            │ todos
+                                                            │
+                                                            │ @backend
+                                                            │ [~] scaffold the…
+                                                            │ @frontend
+                                                            │ [x] wire the log…
+                                                            │
+                                                            │
+                                                            │
+                                                            │
+                                                            │
+                                                            │
+                                                            │
+                                                            │
+                                                            │
+                                                            │
+                                                            │
+                                                            │
+                                                            │
+ ● @backend   ✓ @frontend
+────────────────────────────────────────────────────────────────────────────────
+  ype a message · /make <goal> · /help
+ ⏎ send · ctrl+j newline · esc esc abort · pgup/pgdn scroll · /help

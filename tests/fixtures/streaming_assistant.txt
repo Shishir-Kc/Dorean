@@ -1,0 +1,24 @@
+ deepseek/deepseek-r1:free  ·  openrouter  ·  1234 tok               ◐ running
+▌ ▸ you
+▌ summarize the diff
+▸ assistant
+the diff touches
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ype a message · /make <goal> · /help
+ ⏎ send · ctrl+j newline · esc esc abort · pgup/pgdn scroll · /help

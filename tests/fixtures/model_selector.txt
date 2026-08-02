@@ -1,0 +1,24 @@
+ openrouter/free  ·  openrouter ⚠ no key (/key)                         ○ idle
+
+
+
+
+              ┌─ model───────────────────────────────────────────┐
+              │                                                  │
+              │ filter:                                          │
+              │ › meta-llama/llama-3.3-70b-instruct:free         │
+              │   deepseek/deepseek-r1:free                      │
+              │   google/gemini-2.0-flash-exp:free               │
+              │   nvidia/llama-3.3-nemotron-super-49b-v1         │
+              │                                                  │
+              │                                                  │
+              │                                                  │
+              │                                                  │
+              │                                                  │
+              │                                                  │
+              └──────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ype a message · /make <goal> · /help
+ ⏎ send · ctrl+j newline · esc esc abort · pgup/pgdn scroll · /help
