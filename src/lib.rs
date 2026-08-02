@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod cli;
+pub mod clipboard;
 pub mod config;
 pub mod error;
 pub mod history;
