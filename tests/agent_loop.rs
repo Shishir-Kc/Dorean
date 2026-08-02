@@ -50,6 +50,7 @@ fn config(server: &MockServer) -> Config {
         provider: Provider::OpenRouter,
         base_url: Some(server.uri()),
         openrouter_api_key: Some("sk-test".to_string()),
+        permission_mode: Some(dorean::permissions::PermissionMode::Allow),
         ..Config::default()
     }
 }
@@ -162,6 +163,87 @@ async fn abort_stops_before_first_turn() {
         .unwrap();
     assert!(summary.aborted);
     assert_eq!(summary.turns, 0);
+    assert!(summary.response.is_empty());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn abort_mid_stream_keeps_partial_text() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(1000))
+                .set_body_string(
+                    "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n\
+                     data: [DONE]\n\n",
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = temp_dir("abort-mid");
+    let abort = AbortHandle::new();
+    let options = RunOptions {
+        message: "tell me",
+        print: false,
+        resume: false,
+        cwd: dir.clone(),
+        abort: abort.clone(),
+    };
+    let later_abort = abort.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        later_abort.abort();
+    });
+    // Abort while the response is still in flight; the between-events check in
+    // the loop notices it after the first chunk and stops early.
+    let summary = dorean::agent::run_once(&config(&server), &options)
+        .await
+        .unwrap();
+    assert!(summary.aborted);
+    assert_eq!(summary.turns, 1);
+    assert_eq!(summary.response, "hello");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn abort_during_tool_execution_stops_next_turn() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_string_contains("\"tools\""))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"sleep 2\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+             data: [DONE]\n\n",
+        ))
+        .mount(&server)
+        .await;
+
+    let dir = temp_dir("abort-tool");
+    let abort = AbortHandle::new();
+    let options = RunOptions {
+        message: "run it",
+        print: false,
+        resume: false,
+        cwd: dir.clone(),
+        abort: abort.clone(),
+    };
+    let later_abort = abort.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        later_abort.abort();
+    });
+    // Abort while the tool is still running; the tool finishes, then the next
+    // turn boundary honors the abort.
+    let summary = dorean::agent::run_once(&config(&server), &options)
+        .await
+        .unwrap();
+    assert!(summary.aborted);
+    assert_eq!(summary.turns, 1);
     assert!(summary.response.is_empty());
 
     let _ = fs::remove_dir_all(&dir);

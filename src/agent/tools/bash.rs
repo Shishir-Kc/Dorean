@@ -177,6 +177,20 @@ mod tests {
         assert!(out.contains(dir.to_string_lossy().as_ref()));
         let _ = fs::remove_dir_all(&dir);
     }
+    #[tokio::test]
+    async fn truncates_huge_output() {
+        let out = BashTool
+            .run(
+                &ctx(),
+                json!({ "command": "head -c 100000 /dev/zero | tr '\\0' x" }),
+            )
+            .await
+            .unwrap()
+            .text;
+        assert!(out.contains("output truncated"));
+        assert!(out.len() < 32_000);
+        assert!(out.contains("exit code: 0"));
+    }
 
     #[tokio::test]
     async fn enforces_timeout() {

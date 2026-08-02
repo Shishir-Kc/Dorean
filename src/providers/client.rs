@@ -776,6 +776,73 @@ mod tests {
     }
 
     #[test]
+    fn arbitrary_binary_garbage_never_panics() {
+        let mut decoder = SseDecoder::new();
+        let mut rng = 0x0005_eed2u64.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let mut bytes = vec![0u8; 64 * 1024];
+        for b in &mut bytes {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *b = (rng >> 33) as u8;
+        }
+        let chunks = decoder.push(&bytes);
+        // Garbage must not fabricate events or panic.
+        assert!(
+            chunks
+                .iter()
+                .all(|c| matches!(c, SseChunk::Event(e) if !e.data.is_empty()))
+        );
+        // And the decoder stays usable for a real event afterwards (the \n
+        // closes any partial line the garbage left behind).
+        let mut chunks = decoder.push(b"\ndata: after garbage\n\n");
+        chunks.push(SseChunk::Done);
+        assert!(chunks.len() <= 2);
+        assert!(chunks.iter().any(|c| data_of(c) == "after garbage"));
+    }
+
+    #[test]
+    fn unterminated_stream_emits_nothing() {
+        let mut decoder = SseDecoder::new();
+        let mut all = decoder.push(b"data: never finished\n");
+        all.extend(decoder.push(b"event: message\n"));
+        assert!(all.is_empty());
+        // Closing the stream with a blank line flushes the pending event.
+        let mut all = decoder.push(b"\n");
+        all.extend(decoder.push(b"data: [DONE]\n\n"));
+        assert_eq!(data_of(&all[0]), "never finished");
+        assert_eq!(all[1], SseChunk::Done);
+    }
+
+    #[test]
+    fn giant_data_line_survives() {
+        let payload = "x".repeat(1024 * 1024);
+        let chunks = decode(&format!("data: {payload}\n\n"));
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(data_of(&chunks[0]).len(), 1024 * 1024);
+    }
+
+    #[test]
+    fn corrupted_json_events_do_not_panic() {
+        let samples = [
+            "data: {\"choices\":[\n\n",
+            "data: {\"choices\":[{\"delta\":{}}}\n\n",
+            "data: \u{fffd}\u{fffd} broken utf8\n\n",
+            "data: [DONE]\ndata: trailing\n\n",
+        ];
+        for sample in samples {
+            for chunk in decode(sample) {
+                match chunk {
+                    SseChunk::Event(e) => {
+                        let _ = parse_event(&e.data);
+                    }
+                    SseChunk::Done => {}
+                }
+            }
+        }
+    }
+
+    #[test]
     fn chat_request_includes_tools_when_present() {
         let request = ChatRequest {
             model: "m".to_string(),
