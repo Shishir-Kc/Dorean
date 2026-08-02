@@ -4,6 +4,13 @@
 
 use std::collections::VecDeque;
 
+/// A snapshot of the buffer taken before an editing step (undo/redo).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UndoEntry {
+    text: String,
+    cursor: usize,
+}
+
 /// The multiline input editor.
 #[derive(Debug, Clone, Default)]
 pub struct Input {
@@ -17,10 +24,14 @@ pub struct Input {
     history_index: Option<usize>,
     /// Preserved draft while browsing history.
     draft: String,
+    /// Undo/redo stacks of editing snapshots (Ctrl+Z / Ctrl+Y).
+    undo: Vec<UndoEntry>,
+    redo: Vec<UndoEntry>,
 }
 
 impl Input {
     pub const HISTORY_MAX: usize = 200;
+    const UNDO_MAX: usize = 200;
 
     pub fn text(&self) -> &str {
         &self.text
@@ -36,6 +47,9 @@ impl Input {
 
     /// Reset to empty.
     pub fn clear(&mut self) {
+        if !self.text.is_empty() {
+            self.snapshot();
+        }
         self.text.clear();
         self.cursor = 0;
         self.history_index = None;
@@ -75,6 +89,7 @@ impl Input {
     pub fn insert_str(&mut self, s: &str) {
         self.cancel_history();
         if !s.is_empty() {
+            self.snapshot();
             self.text.insert_str(self.cursor, s);
             self.cursor += s.len();
         }
@@ -85,6 +100,7 @@ impl Input {
         if self.cursor == 0 {
             return;
         }
+        self.snapshot();
         let start = prev_boundary(&self.text, self.cursor);
         self.text.drain(start..self.cursor);
         self.cursor = start;
@@ -95,6 +111,7 @@ impl Input {
         if self.cursor >= self.text.len() {
             return;
         }
+        self.snapshot();
         let end = next_boundary(&self.text, self.cursor);
         self.text.drain(self.cursor..end);
     }
@@ -102,6 +119,7 @@ impl Input {
     /// Delete the word immediately before the cursor (Ctrl+W).
     pub fn delete_word_left(&mut self) {
         self.cancel_history();
+        self.snapshot();
         let end = self.cursor;
         let mut idx = end;
         while idx > 0
@@ -127,6 +145,58 @@ impl Input {
     pub fn newline(&mut self) {
         self.cancel_history();
         self.insert_str("\n");
+    }
+
+    // --- Undo / redo -------------------------------------------------------
+
+    /// Snapshot the buffer for undo. Skips no-op duplicates (e.g. backspace at
+    /// a word boundary after delete_word_left) and bounds the stack.
+    fn snapshot(&mut self) {
+        if self
+            .undo
+            .last()
+            .is_some_and(|entry| entry.text == self.text && entry.cursor == self.cursor)
+        {
+            return;
+        }
+        self.undo.push(UndoEntry {
+            text: self.text.clone(),
+            cursor: self.cursor,
+        });
+        if self.undo.len() > Self::UNDO_MAX {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    /// Undo the last editing step (Ctrl+Z). Returns true when something was
+    /// undone.
+    pub fn undo(&mut self) -> bool {
+        let Some(entry) = self.undo.pop() else {
+            return false;
+        };
+        self.redo.push(UndoEntry {
+            text: self.text.clone(),
+            cursor: self.cursor,
+        });
+        self.text = entry.text;
+        self.cursor = entry.cursor;
+        true
+    }
+
+    /// Redo the last undone step (Ctrl+Y). Returns true when something was
+    /// redone.
+    pub fn redo(&mut self) -> bool {
+        let Some(entry) = self.redo.pop() else {
+            return false;
+        };
+        self.undo.push(UndoEntry {
+            text: self.text.clone(),
+            cursor: self.cursor,
+        });
+        self.text = entry.text;
+        self.cursor = entry.cursor;
+        true
     }
 
     // --- Motion ------------------------------------------------------------
@@ -454,5 +524,75 @@ mod tests {
         input.move_right();
         input.insert_str("x");
         assert_eq!(input.text(), "héxllo");
+    }
+
+    #[test]
+    fn undo_steps_back_through_edits() {
+        let mut input = Input::default();
+        for c in "hello".chars() {
+            input.push_char(c);
+        }
+        input.backspace();
+        assert_eq!(input.text(), "hell");
+        assert!(input.undo()); // backspace
+        assert_eq!(input.text(), "hello");
+        assert!(input.undo()); // last typed 'o'
+        assert_eq!(input.text(), "hell");
+        assert!(input.undo()); // previous 'l'
+        assert_eq!(input.text(), "hel");
+        assert!(input.undo()); // 'e'
+        assert!(input.undo()); // 'h'
+        assert!(input.undo()); // the original empty buffer
+        assert_eq!(input.text(), "");
+        assert!(!input.undo()); // nothing left
+    }
+
+    #[test]
+    fn undo_redo_round_trip() {
+        let mut input = Input::default();
+        for c in "abc".chars() {
+            input.push_char(c);
+        }
+        input.backspace(); // "ab"
+        input.undo(); // "abc"
+        assert_eq!(input.text(), "abc");
+        assert!(input.redo()); // "ab"
+        assert_eq!(input.text(), "ab");
+        assert!(!input.redo()); // redo stack exhausted
+        assert_eq!(input.text(), "ab");
+    }
+
+    #[test]
+    fn new_edit_clears_redo() {
+        let mut input = Input::default();
+        input.push_char('a');
+        input.undo();
+        input.push_char('b');
+        assert!(!input.redo());
+        assert_eq!(input.text(), "b");
+    }
+
+    #[test]
+    fn undo_restores_cursor_position() {
+        let mut input = Input::default();
+        input.set_text("hello world".to_string());
+        input.move_home();
+        input.move_word_right(); // after "hello "
+        input.insert_str("big ");
+        let cursor = input.cursor();
+        assert_eq!(input.text(), "hello big world");
+        assert!(input.undo());
+        assert_eq!(input.text(), "hello world");
+        assert_eq!(input.cursor(), cursor - 4);
+    }
+
+    #[test]
+    fn undo_does_not_capture_history_nav() {
+        let mut input = Input::default();
+        input.set_text("one".to_string());
+        input.submit();
+        input.history_prev();
+        assert_eq!(input.text(), "one");
+        assert!(!input.undo());
     }
 }
