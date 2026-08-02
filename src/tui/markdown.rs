@@ -215,7 +215,18 @@ fn wrap_spans(spans: &[(String, Style)], width: usize) -> Vec<Vec<(String, Style
                         space_after: false,
                     });
                 }
-                c if c.is_whitespace() => flush(&mut words, &mut word, true),
+                c if c.is_whitespace() => {
+                    if word.is_empty() {
+                        // Whitespace at a span boundary: the previous word was
+                        // already flushed at its span end, so mark it instead
+                        // of dropping the gap between spans.
+                        if let Some(last) = words.last_mut() {
+                            last.space_after = true;
+                        }
+                    } else {
+                        flush(&mut words, &mut word, true);
+                    }
+                }
                 _ => word.push(c),
             }
         }
@@ -622,6 +633,14 @@ mod tests {
         let lines = render_markdown("hello brave new world", 10);
         assert_eq!(lines.len(), 3);
         assert!(text_of(&lines[0]).starts_with("hello"));
+    }
+
+    #[test]
+    fn spaces_survive_span_boundaries() {
+        let lines = render_markdown("fix the **bug** in `main.rs`", 60);
+        assert_eq!(text_of(&lines[0]), "fix the bug in main.rs");
+        let lines = render_markdown("**bold** and `code`", 40);
+        assert_eq!(text_of(&lines[0]), "bold and code");
     }
 
     #[test]
