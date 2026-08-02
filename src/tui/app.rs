@@ -2218,6 +2218,227 @@ mod app_tests {
         .unwrap()
     }
 
+    // --- Golden screen snapshots (vt100) -----------------------------------
+
+    /// Render the app's current frame to plain text via a `vt100` parser.
+    /// Colors are exercised separately by unit tests; these snapshots pin the
+    /// text layout of the whole frame.
+    fn frame_text(app: &mut App) -> String {
+        let (cols, rows) = app.term_size;
+        let width = cols as usize;
+        let height = rows as usize;
+        let screen = app.render_frame(width, height).unwrap();
+        let mut bytes = Vec::new();
+        let mut prev = Screen::default_blank(1, 1);
+        screen.flush(&mut bytes, &mut prev).unwrap();
+        let mut parser = vt100::Parser::new(height as u16, width as u16, 0);
+        parser.process(&bytes);
+        let contents = parser.screen().contents();
+        contents
+            .lines()
+            .map(|line| line.trim_end())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end_matches('\n')
+            .to_string()
+    }
+
+    /// Compare a rendered frame against `tests/fixtures/<name>.txt`. Run with
+    /// `DOREAN_BLESS=1` to (re)generate the fixture.
+    fn assert_golden(app: &mut App, name: &str) {
+        app.term_size = (80, 24);
+        app.animate = false;
+        let text = frame_text(app);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(format!("{name}.txt"));
+        if std::env::var("DOREAN_BLESS").is_ok() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("{text}\n")).unwrap();
+            return;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "golden fixture missing: {} (run with DOREAN_BLESS=1 to write it)",
+                path.display()
+            )
+        });
+        assert_eq!(
+            text,
+            expected.trim_end_matches('\n'),
+            "golden snapshot `{name}` drifted — run with DOREAN_BLESS=1 to bless the new frame"
+        );
+    }
+
+    #[test]
+    fn golden_idle_chat() {
+        let mut app = test_app();
+        app.model = "meta-llama/llama-3.3-70b-instruct:free".to_string();
+        app.config.openrouter_api_key = Some("sk-test".to_string());
+        app.messages
+            .push(Message::user("fix the **bug** in `main.rs`"));
+        app.messages.push(Message::assistant(
+            "Found it — the parser dropped trailing spaces:\n\n- added a `trim`\n- verified with tests\n\n```rust\nlet x = 1;\n```",
+        ));
+        app.messages.push(Message {
+            kind: MessageKind::Tool(ToolUi {
+                id: "call_1".to_string(),
+                name: "edit".to_string(),
+                summary: "src/main.rs".to_string(),
+                status: ToolStatus::Ok,
+                output: "patched src/main.rs".to_string(),
+                expanded: true,
+                max_lines: 8,
+            }),
+            text: String::new(),
+            reasoning: String::new(),
+            streaming: false,
+        });
+        assert_golden(&mut app, "idle_chat");
+    }
+
+    #[test]
+    fn golden_streaming_assistant() {
+        let mut app = test_app();
+        app.running = true;
+        app.animate = true;
+        app.model = "deepseek/deepseek-r1:free".to_string();
+        app.config.openrouter_api_key = Some("sk-test".to_string());
+        app.usage.total_tokens = 1234;
+        app.messages.push(Message::user("summarize the diff"));
+        let mut streaming = Message::assistant("the diff touches ");
+        streaming.streaming = true;
+        app.messages.push(streaming);
+        assert_golden(&mut app, "streaming_assistant");
+    }
+
+    #[test]
+    fn golden_model_selector() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::Model(SelectList::new(
+            "model",
+            vec![
+                "meta-llama/llama-3.3-70b-instruct:free".to_string(),
+                "deepseek/deepseek-r1:free".to_string(),
+                "google/gemini-2.0-flash-exp:free".to_string(),
+                "nvidia/llama-3.3-nemotron-super-49b-v1".to_string(),
+            ],
+        )));
+        assert_golden(&mut app, "model_selector");
+    }
+
+    #[test]
+    fn golden_help_overlay() {
+        let mut app = test_app();
+        app.run_command("help");
+        assert_golden(&mut app, "help_overlay");
+    }
+
+    #[test]
+    fn golden_roster_and_todos() {
+        let mut app = test_app();
+        app.model = "m1".to_string();
+        app.roster = vec![
+            AgentManifest {
+                name: "backend".to_string(),
+                role: "API".to_string(),
+                responsibilities: vec!["endpoints".to_string()],
+                allowed_tools: Some(vec!["bash".to_string()]),
+                owned_paths: vec![PathBuf::from("src")],
+                model: None,
+            },
+            AgentManifest {
+                name: "frontend".to_string(),
+                role: "UI".to_string(),
+                responsibilities: vec!["pages".to_string()],
+                allowed_tools: Some(vec!["bash".to_string()]),
+                owned_paths: vec![PathBuf::from("ui")],
+                model: None,
+            },
+        ];
+        app.agent_status
+            .insert("backend".to_string(), AgentStatus::Running);
+        app.agent_status
+            .insert("frontend".to_string(), AgentStatus::Done);
+        app.show_todos = true;
+        app.todos = vec![
+            crate::agent::todos::TodoItem {
+                id: "1".to_string(),
+                agent: "backend".to_string(),
+                title: "scaffold the API".to_string(),
+                status: crate::agent::todos::TodoStatus::InProgress,
+            },
+            crate::agent::todos::TodoItem {
+                id: "2".to_string(),
+                agent: "frontend".to_string(),
+                title: "wire the login page".to_string(),
+                status: crate::agent::todos::TodoStatus::Done,
+            },
+        ];
+        app.running = true;
+        assert_golden(&mut app, "roster_todos");
+    }
+
+    #[test]
+    fn golden_no_key_hint() {
+        let mut app = test_app();
+        app.model = "m1".to_string();
+        app.config.openrouter_api_key = None;
+        assert_golden(&mut app, "no_key_hint");
+    }
+
+    // --- Resize / SIGWINCH -------------------------------------------------
+
+    #[test]
+    fn resize_sigwinch_shrinks_and_renders() {
+        let mut app = test_app();
+        app.messages.push(Message::assistant("a".repeat(400)));
+        // SIGWINCH arrives as Event::Resize (crossterm translates it).
+        app.handle_term_event(Event::Resize(60, 16));
+        assert_eq!(app.term_size, (60, 16));
+        let text = frame_text(&mut app);
+        // The frame must be exactly the new size.
+        assert_eq!(text.lines().count(), 16);
+        assert!(text.lines().all(|l| l.chars().count() <= 60));
+        // A very small terminal renders (no panic) and yields no frame.
+        app.handle_term_event(Event::Resize(10, 3));
+        assert_eq!(frame_text(&mut app), "");
+    }
+
+    #[test]
+    fn resize_grows_and_reflows() {
+        let mut app = test_app();
+        app.messages.push(Message::assistant("hello world"));
+        app.handle_term_event(Event::Resize(40, 12));
+        let small = frame_text(&mut app);
+        app.handle_term_event(Event::Resize(120, 40));
+        let large = frame_text(&mut app);
+        assert!(small.contains("hello world"));
+        assert!(large.contains("hello world"));
+        assert_eq!(large.lines().count(), 40);
+    }
+
+    #[test]
+    fn scroll_is_clamped_after_shrink() {
+        let mut app = test_app();
+        for i in 0..30 {
+            app.messages
+                .push(Message::assistant(format!("message {i}")));
+        }
+        app.handle_term_event(Event::Resize(80, 12));
+        app.scroll = 1_000_000;
+        // Rendering clamps the scroll so no panic and a sane frame: the top of
+        // the list is shown, not the scrolled-off bottom.
+        let text = frame_text(&mut app);
+        assert!(text.contains("message 0"));
+        assert!(!text.contains("message 29"));
+        // At the bottom of the list (scroll 0) the newest message is visible.
+        app.scroll = 0;
+        let text = frame_text(&mut app);
+        assert!(text.contains("message 29"));
+    }
+
     #[test]
     fn release_events_do_not_type() {
         let mut app = test_app();
@@ -2370,6 +2591,263 @@ mod app_tests {
         assert!(!app.show_thinking);
         app.run_command("thinking");
         assert!(app.show_thinking);
+    }
+
+    #[test]
+    fn permission_command_opens_selector_and_applies() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_events_tx, events_rx) = mpsc::unbounded_channel();
+        let (_approve_tx, approve_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp"),
+            Theme::dark(),
+            cmd_tx,
+            events_rx,
+            approve_rx,
+            AbortHandle::new(),
+            false,
+        )
+        .unwrap();
+
+        app.run_command("permission");
+        assert!(matches!(app.overlay, Some(Overlay::PermMode(_))));
+        // Choose "deny" in the selector.
+        app.overlay = Some(Overlay::PermMode(SelectList::new(
+            "permission mode",
+            vec!["allow".to_string(), "ask".to_string(), "deny".to_string()],
+        )));
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.config.permission_mode, Some(PermissionMode::Deny));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCmd::SetPermission(PermissionMode::Deny))
+        ));
+    }
+
+    #[test]
+    fn permission_command_with_arg_applies_directly() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_events_tx, events_rx) = mpsc::unbounded_channel();
+        let (_approve_tx, approve_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp"),
+            Theme::dark(),
+            cmd_tx,
+            events_rx,
+            approve_rx,
+            AbortHandle::new(),
+            false,
+        )
+        .unwrap();
+        app.run_command("permission allow");
+        assert_eq!(app.config.permission_mode, Some(PermissionMode::Allow));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCmd::SetPermission(PermissionMode::Allow))
+        ));
+        app.run_command("permission bogus");
+        assert_eq!(app.toasts.len(), 2); // error toast
+        assert!(matches!(app.toasts.back(), Some((_, ToastKind::Error, _))));
+    }
+
+    #[serial]
+    #[test]
+    fn theme_command_switches_theme_and_persists() {
+        unsafe {
+            std::env::set_var("COLORFGBG", "15;0");
+        }
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (_events_tx, events_rx) = mpsc::unbounded_channel();
+        let (_approve_tx, approve_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp"),
+            Theme::dark(),
+            cmd_tx,
+            events_rx,
+            approve_rx,
+            AbortHandle::new(),
+            false,
+        )
+        .unwrap();
+        app.run_command("theme light");
+        assert_eq!(app.config.theme.as_deref(), Some("light"));
+        assert_eq!(app.theme.bg, Theme::light().bg);
+
+        app.run_command("theme auto");
+        assert_eq!(app.config.theme, None);
+        // stdin is not a terminal in tests, so detection uses the heuristic.
+        assert_eq!(app.theme.bg, Theme::dark().bg);
+    }
+
+    #[serial]
+    #[test]
+    fn theme_selector_lists_builtins_and_customs() {
+        unsafe {
+            std::env::set_var("DOREAN_THEME_DIR", theme_test_dir());
+        }
+        std::fs::create_dir_all(Theme::themes_dir()).unwrap();
+        std::fs::write(Theme::themes_dir().join("gruvbox.json"), "{}").unwrap();
+        let mut app = test_app();
+        app.run_command("theme");
+        let Some(Overlay::Theme(list)) = app.overlay.as_ref() else {
+            panic!("expected theme selector");
+        };
+        assert!(list.items.iter().any(|i| i == "auto"));
+        assert!(list.items.iter().any(|i| i == "light"));
+        assert!(list.items.iter().any(|i| i == "dark"));
+        assert!(list.items.iter().any(|i| i == "gruvbox"));
+    }
+
+    fn theme_test_dir() -> String {
+        std::env::temp_dir()
+            .join(format!("dorean-app-themes-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn regenerate_truncates_and_resends() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_events_tx, events_rx) = mpsc::unbounded_channel();
+        let (_approve_tx, approve_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp"),
+            Theme::dark(),
+            cmd_tx,
+            events_rx,
+            approve_rx,
+            AbortHandle::new(),
+            false,
+        )
+        .unwrap();
+        app.messages.push(Message::user("fix the bug"));
+        app.messages.push(Message::assistant("old answer"));
+        app.messages.push(Message::system("tool ran"));
+
+        app.run_command("regenerate");
+        assert_eq!(app.messages.len(), 1); // only the user message remains
+        assert!(app.running);
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCmd::Regenerate { text }) if text == "fix the bug"
+        ));
+    }
+
+    #[test]
+    fn regenerate_without_history_toasts() {
+        let mut app = test_app();
+        app.run_command("regenerate");
+        assert!(!app.running);
+        assert!(matches!(app.toasts.back(), Some((_, ToastKind::Error, _))));
+    }
+
+    #[test]
+    fn sessions_selector_lists_and_loads() {
+        let dir = std::env::temp_dir().join(format!("dorean-sess-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".dorean/sessions")).unwrap();
+        let record = crate::history::SessionRecord {
+            id: "s1".to_string(),
+            created_at: 1_700_000_000,
+            model: "m1".to_string(),
+            messages: vec![
+                crate::providers::client::Message::user("first ask"),
+                crate::providers::client::Message::assistant(
+                    "first answer".to_string(),
+                    Vec::new(),
+                ),
+            ],
+        };
+        crate::history::append_session(&dir, &record).unwrap();
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_events_tx, events_rx) = mpsc::unbounded_channel();
+        let (_approve_tx, approve_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(
+            Config::default(),
+            dir.clone(),
+            Theme::dark(),
+            cmd_tx,
+            events_rx,
+            approve_rx,
+            AbortHandle::new(),
+            false,
+        )
+        .unwrap();
+
+        app.run_command("sessions");
+        assert!(matches!(app.overlay, Some(Overlay::Sessions(_))));
+        assert_eq!(app.sessions.len(), 1);
+
+        // Enter picks the (only) session.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.model, "m1");
+        assert!(matches!(cmd_rx.try_recv(), Ok(SessionCmd::LoadSession(_))));
+        assert!(matches!(cmd_rx.try_recv(), Ok(SessionCmd::SetModel(m)) if m == "m1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sessions_without_history_toasts() {
+        let mut app = test_app();
+        app.run_command("sessions");
+        assert!(app.overlay.is_none());
+        assert!(matches!(app.toasts.back(), Some((_, ToastKind::Error, _))));
+    }
+
+    #[test]
+    fn copy_command_uses_last_assistant_reply() {
+        let mut app = test_app();
+        app.messages.push(Message::user("hello"));
+        app.messages.push(Message::assistant("hi **there**"));
+        app.run_command("copy");
+        assert!(
+            matches!(app.toasts.back(), Some((text, ToastKind::Success, _)) if text.starts_with("copied"))
+        );
+        // copy all joins the conversation
+        app.run_command("copy all");
+        assert!(
+            matches!(app.toasts.back(), Some((text, ToastKind::Success, _)) if text.starts_with("copied"))
+        );
+    }
+
+    #[test]
+    fn copy_without_reply_toasts_error() {
+        let mut app = test_app();
+        app.run_command("copy");
+        assert!(matches!(app.toasts.back(), Some((_, ToastKind::Error, _))));
+    }
+
+    #[test]
+    fn undo_redo_keys_edit_input() {
+        let mut app = test_app();
+        for c in "ab".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(app.input.text(), "ab");
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.text(), "a");
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.text(), "");
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.text(), "a");
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(app.input.text(), "ab");
+    }
+
+    #[test]
+    fn resize_event_updates_term_size() {
+        let mut app = test_app();
+        app.handle_term_event(Event::Resize(120, 40));
+        assert_eq!(app.term_size, (120, 40));
     }
 
     #[test]
