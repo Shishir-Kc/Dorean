@@ -210,6 +210,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
 
     fn temp_config(name: &str, contents: &str) -> PathBuf {
@@ -281,6 +282,7 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[serial]
     #[test]
     fn env_overrides_config() {
         unsafe {
@@ -316,6 +318,7 @@ mod tests {
         assert_eq!(Provider::Nvidia.to_string(), "nvidia");
     }
 
+    #[serial]
     #[test]
     fn env_sets_nvidia_key() {
         unsafe {
@@ -325,6 +328,7 @@ mod tests {
         assert_eq!(cfg.nvidia_api_key.as_deref(), Some("nvapi-test"));
     }
 
+    #[serial]
     #[test]
     fn parses_agent_models_env() {
         unsafe {

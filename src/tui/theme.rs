@@ -1,10 +1,17 @@
 //! Theme model: a small palette of ANSI/truecolor values with light and dark
 //! variants, auto-detected from the terminal background (OSC 11), the
-//! `COLORFGBG` environment variable, or the config file.
+//! `COLORFGBG` environment variable, or the config file. Custom JSON themes
+//! live in `~/.dorean/themes/<name>.json` and override the dark base palette.
+
+use std::path::PathBuf;
 
 use crossterm::style::Color;
+use serde::Deserialize;
 
 use crate::config::Config;
+
+/// The config value for "follow the terminal's detected background".
+pub const THEME_AUTO: &str = "auto";
 
 /// The full palette used by the TUI. Every value is a crossterm [`Color`], so
 /// themes can mix ANSI-256 and truecolor entries.
@@ -347,18 +354,67 @@ impl Theme {
     /// The theme for a run: an explicit config override wins, then the
     /// terminal's detected background (OSC 11, best-effort), then the
     /// `COLORFGBG` environment heuristic, then dark.
+    ///
+    /// `config.theme` accepts `auto` (the default — detect), `light`, `dark`,
+    /// or the name of a JSON theme in `~/.dorean/themes/`. A custom theme that
+    /// fails to load falls back to detection.
     pub fn detect(config: &Config) -> Theme {
-        if let Some(choice) = config.theme.as_deref() {
-            match choice.trim().to_ascii_lowercase().as_str() {
-                "light" => return Theme::light(),
-                "dark" => return Theme::dark(),
-                _ => {} // fall through to detection for anything else
+        match config
+            .theme
+            .as_deref()
+            .map(|t| t.trim().to_ascii_lowercase())
+        {
+            Some(name) if name == "light" => Theme::light(),
+            Some(name) if name == "dark" => Theme::dark(),
+            Some(name) if name != THEME_AUTO && !name.is_empty() => {
+                Theme::load_custom(&name).unwrap_or_else(detected)
             }
+            _ => detected(),
         }
-        match detected_choice() {
-            ThemeChoice::Light => Theme::light(),
-            ThemeChoice::Dark => Theme::dark(),
-        }
+    }
+
+    /// Where custom themes are looked up: `$DOREAN_THEME_DIR`, else
+    /// `~/.dorean/themes`.
+    pub fn themes_dir() -> PathBuf {
+        std::env::var("DOREAN_THEME_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                crate::config::Config::config_dir()
+                    .unwrap_or_else(|_| PathBuf::from(".dorean"))
+                    .join("themes")
+            })
+    }
+
+    /// Custom themes live in `$DOREAN_THEME_DIR/<name>.json` (default
+    /// `~/.dorean/themes/`). Returns the parsed theme (dark base + overrides)
+    /// or `None` when the file is missing or malformed.
+    pub fn load_custom(name: &str) -> Option<Theme> {
+        let text = std::fs::read_to_string(Self::themes_dir().join(format!("{name}.json"))).ok()?;
+        let patch: ThemePatch = serde_json::from_str(&text).ok()?;
+        let mut theme = Theme::dark();
+        patch.apply(&mut theme);
+        Some(theme)
+    }
+
+    /// The names of all custom JSON themes installed (file stem of each
+    /// `*.json`, sorted).
+    pub fn custom_theme_names() -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(Self::themes_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+            .filter_map(|entry| {
+                entry
+                    .path()
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Query the live terminal background (OSC 11). Best-effort; falls back to
@@ -376,10 +432,131 @@ impl Theme {
     }
 }
 
+/// A JSON theme file: every field optional, all values CSS-style `#rrggbb`
+/// hex or ANSI color names. Missing fields inherit from the dark base.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ThemePatch {
+    bg: Option<String>,
+    fg: Option<String>,
+    dim: Option<String>,
+    accent: Option<String>,
+    header_bg: Option<String>,
+    status_bg: Option<String>,
+    border: Option<String>,
+    selection_bg: Option<String>,
+    user: Option<String>,
+    agent: Option<String>,
+    user_bg: Option<String>,
+    agent_bg: Option<String>,
+    tool_bg: Option<String>,
+    tool_bar: Option<String>,
+    tool_header: Option<String>,
+    code_bg: Option<String>,
+    code_fg: Option<String>,
+    error: Option<String>,
+    warning: Option<String>,
+    success: Option<String>,
+    keyword: Option<String>,
+    string: Option<String>,
+    comment: Option<String>,
+    number: Option<String>,
+    type_color: Option<String>,
+    diff_add: Option<String>,
+    diff_del: Option<String>,
+    diff_hunk: Option<String>,
+}
+
+impl ThemePatch {
+    fn apply(&self, theme: &mut Theme) {
+        macro_rules! patch {
+            ($($field:ident),* $(,)?) => {
+                $(
+                    if let Some(value) = &self.$field
+                        && let Some(color) = parse_color(value)
+                    {
+                        theme.$field = color;
+                    }
+                )*
+            };
+        }
+        patch!(
+            bg,
+            fg,
+            dim,
+            accent,
+            header_bg,
+            status_bg,
+            border,
+            selection_bg,
+            user,
+            agent,
+            user_bg,
+            agent_bg,
+            tool_bg,
+            tool_bar,
+            tool_header,
+            code_bg,
+            code_fg,
+            error,
+            warning,
+            success,
+            keyword,
+            string,
+            comment,
+            number,
+            type_color,
+            diff_add,
+            diff_del,
+            diff_hunk,
+        );
+    }
+}
+
+/// Parse a `#rrggbb` hex string or a basic ANSI color name.
+fn parse_color(value: &str) -> Option<Color> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix('#') {
+        if hex.len() != 6 {
+            return None;
+        }
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        return Some(Color::Rgb { r, g, b });
+    }
+    match value.to_ascii_lowercase().as_str() {
+        "black" => Some(Color::Black),
+        "red" => Some(Color::DarkRed),
+        "green" => Some(Color::DarkGreen),
+        "yellow" => Some(Color::DarkYellow),
+        "blue" => Some(Color::DarkBlue),
+        "magenta" => Some(Color::DarkMagenta),
+        "cyan" => Some(Color::DarkCyan),
+        "white" => Some(Color::Grey),
+        "gray" | "grey" => Some(Color::DarkGrey),
+        "bright-red" => Some(Color::Red),
+        "bright-green" => Some(Color::Green),
+        "bright-yellow" => Some(Color::Yellow),
+        "bright-blue" => Some(Color::Blue),
+        "bright-magenta" => Some(Color::Magenta),
+        "bright-cyan" => Some(Color::Cyan),
+        "bright-white" => Some(Color::White),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ThemeChoice {
     Light,
     Dark,
+}
+
+fn detected() -> Theme {
+    match detected_choice() {
+        ThemeChoice::Light => Theme::light(),
+        ThemeChoice::Dark => Theme::dark(),
+    }
 }
 
 fn detected_choice() -> ThemeChoice {
@@ -401,7 +578,9 @@ fn detected_choice() -> ThemeChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
+    #[serial]
     #[test]
     fn explicit_theme_wins() {
         let config = Config {
@@ -427,6 +606,7 @@ mod tests {
         let _ = Theme::detect(&config);
     }
 
+    #[serial]
     #[test]
     fn colorfgbg_detection() {
         unsafe {
@@ -437,5 +617,99 @@ mod tests {
             std::env::set_var("COLORFGBG", "0;15"); // light bg
         }
         assert_eq!(detected_choice(), ThemeChoice::Light);
+    }
+
+    #[serial]
+    #[test]
+    fn auto_theme_means_detection() {
+        let config = Config {
+            theme: Some("auto".to_string()),
+            ..Config::default()
+        };
+        unsafe {
+            std::env::set_var("COLORFGBG", "0;15"); // light terminal
+        }
+        assert_eq!(Theme::detect(&config).bg, Theme::light().bg);
+    }
+
+    #[test]
+    fn parses_hex_and_named_colors() {
+        assert_eq!(
+            parse_color("#ff0000"),
+            Some(Color::Rgb {
+                r: 0xff,
+                g: 0x00,
+                b: 0x00
+            })
+        );
+        assert_eq!(parse_color("bright-green"), Some(Color::Green));
+        assert_eq!(parse_color("#12345"), None);
+        assert_eq!(parse_color("neon"), None);
+    }
+
+    #[serial]
+    #[test]
+    fn custom_theme_overrides_dark_base() {
+        unsafe {
+            std::env::set_var("DOREAN_THEME_DIR", theme_test_dir());
+        }
+        std::fs::create_dir_all(Theme::themes_dir()).unwrap();
+        let path = Theme::themes_dir().join("solarized.json");
+        std::fs::write(
+            &path,
+            r##"{"bg": "#002b36", "fg": "#839496", "accent": "bright-blue"}"##,
+        )
+        .unwrap();
+
+        let theme = Theme::load_custom("solarized").unwrap();
+        assert_eq!(
+            theme.bg,
+            Color::Rgb {
+                r: 0x00,
+                g: 0x2b,
+                b: 0x36
+            }
+        );
+        assert_eq!(
+            theme.fg,
+            Color::Rgb {
+                r: 0x83,
+                g: 0x94,
+                b: 0x96
+            }
+        );
+        assert_eq!(theme.accent, Color::Blue);
+        // Unset fields inherit the dark base.
+        assert_eq!(theme.code_bg, Theme::dark().code_bg);
+
+        // Config routing picks the custom theme up.
+        let config = Config {
+            theme: Some("solarized".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(Theme::detect(&config).bg, theme.bg);
+
+        assert!(Theme::custom_theme_names().contains(&"solarized".to_string()));
+    }
+
+    fn theme_test_dir() -> String {
+        std::env::temp_dir()
+            .join(format!("dorean-themes-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[serial]
+    #[test]
+    fn missing_custom_theme_falls_back_to_detection() {
+        unsafe {
+            std::env::set_var("COLORFGBG", "15;0"); // dark terminal
+        }
+        let config = Config {
+            theme: Some("no-such-theme".to_string()),
+            ..Config::default()
+        };
+        // Must not panic; returns the detected (dark default) theme.
+        assert_eq!(Theme::detect(&config).bg, Theme::dark().bg);
     }
 }
