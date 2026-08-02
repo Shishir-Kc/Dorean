@@ -148,16 +148,16 @@ dorean/
 - [x] command palette so far: `/help`, `/model`, `/key`, `/stack`, `/make`, `/thinking`, `/todo`, `/spec`, `/clear`, `/abort`, `/quit`
 - [x] API key entry: `/key` masked-input overlay, persisted to `~/.dorean/config.json`, rebuilds the agent and jumps straight into the model selector
 - [x] `/model` actually works against the live API: `deserialize_price` tolerates the `"request": null`/cache-null pricing shape OpenRouter emits on every model (previously the first model failed to parse and the list was always empty); fetch has connect + per-request timeouts so the loading overlay can never hang; Esc dismisses it; `GET /models` is public so the selector works even before a key is set
-- [ ] command palette remaining: `/copy`, `/permission`, `/theme`, `/sessions`, `/regenerate`
+- [x] command palette: `/copy [all]` (OSC 52 + wl-copy/xclip/xsel fallbacks), `/permission [mode]` + selector, `/theme [auto|light|dark|<json>]` + selector, `/sessions` selector (load + re-run), `/regenerate` (truncates to the last user message and re-runs)
 - [x] model selector: grouped Free (OpenRouter), type-to-filter
 - [x] selector for tool-approval in interactive mode (permission overlay)
-- [ ] theme: light/dark auto-detect (OSC 11 bg is queried) + JSON themes
+- [x] theme: light/dark auto-detect (OSC 11 bg is queried) + JSON themes (`~/.dorean/themes/`, `DOREAN_THEME_DIR`; selector + `/theme` command)
 - [x] toasts/notifications (errors, permission prompts)
 - [x] status bar: provider, model, token usage, turn counter (header)
 - [x] session history persistence + resume (`--continue`)
-- [ ] provider status hint (OpenRouter reachability / API key missing)
+- [x] provider status hint (header shows `⚠ no key (/key)` in the warning color when the provider key is missing)
 - [x] `@agentname` direct-message UX polish: per-agent brains — `/make` opens a per-sub-agent model picker before spawning (each agent runs on its own chosen model; config `agent_models` / `DOREAN_AGENT_MODELS` for the non-interactive path); `/thinking` toggles the reasoning block
-- [ ] regenerate last reply, clipboard copy, external `$EDITOR`, undo stack
+- [x] regenerate last reply (`/regenerate`), clipboard copy (`/copy`), external `$EDITOR` (Ctrl+E, suspends the TUI), undo stack (Ctrl+Z undo / Ctrl+Y redo in the input)
 
 **Exit:** polished, keyboard-driven agent UI.
 
@@ -166,9 +166,10 @@ dorean/
 - [x] unit: manifest/todos parsing, owned-path enforcement, router (`@mention` parsing)
 - [x] integration: mock HTTP server for providers (`tests/openrouter.rs`), agent-loop fixtures (`tests/agent_loop.rs`)
 - [x] integration: orchestration fixture — scripted prompt → roster → parallel sub-agents → todos merged (`tests/orchestration.rs`)
-- [ ] golden screen snapshots via `vt100`
-- [ ] resize + SIGWINCH handling tests
-- [ ] fuzz-ish: malformed SSE, huge output, abort mid-stream
+- [x] golden screen snapshots via `vt100` (`tests/fixtures/*.txt`, `DOREAN_BLESS=1` to regenerate; idle chat, streaming assistant, model selector, help overlay, roster+todos, no-key hint)
+- [x] resize + SIGWINCH handling tests (shrink/re-grow reflow, scroll clamped after shrink, tiny terminals render empty)
+- [x] fuzz-ish: malformed SSE (random binary garbage, unterminated stream, giant data lines, corrupted JSON), huge output (bash 30k truncation marker), abort mid-stream + abort during tool execution
+- [x] markdown regression: spaces survive styled-span boundaries (`**bug** in` no longer glues to `bugin`)
 - [x] install path superseded by the cargo-dist release pipeline (Phase 9) — local binary verified via packaged archive
 
 **Exit:** CI green, stable on real tasks.
@@ -190,7 +191,7 @@ dorean/
 - **M2** agent loop + core tools, non-interactive works (Phases 3–4) ✅
 - **M3** sub-agent orchestration: parallel multi-agent build + @mention routing (Phase 5) ✅
 - **M4** chat TUI live (Phase 6) ✅
-- **M5** selectors/polish + hardening (Phases 7–8)
+- **M5** selectors/polish + hardening (Phases 7–8) ✅
 - **M6** distribution: cargo-dist release pipeline (Phase 9) ✅ (v0.1.0 and v0.1.1 released)
 
 ## Not in scope (phase 0 decisions)

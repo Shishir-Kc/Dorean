@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `/copy [all]` copies the last assistant reply (or the whole session) via OSC 52
+  with wl-copy/xclip/xsel fallbacks
+- `/permission [mode]` + selector to switch allow/ask/deny on the fly (persisted)
+- `/theme [auto|light|dark|<json>]` + selector; JSON themes loaded from
+  `~/.dorean/themes/` (override with `DOREAN_THEME_DIR`)
+- `/sessions` selector to load a saved session back into the chat
+- `/regenerate` truncates the conversation to the last user message and re-runs
+- Ctrl+Z / Ctrl+Y input undo/redo; Ctrl+E opens `$EDITOR` (TUI suspends)
+- Header hint `⚠ no key (/key)` when the provider key is missing
+- Golden `vt100` screen snapshots (`tests/fixtures/`, `DOREAN_BLESS=1` to
+  regenerate), resize/SIGWINCH tests, malformed-SSE / huge-output / abort
+  fuzz-ish tests
+
+### Fixed
+
+- Markdown wrapping dropped spaces across styled-span boundaries
+  (`**bug** in` rendered as `bugin`)
+- Scroll clamping test semantics (max scroll shows the top of the list, not the
+  bottom)
+
 ## [0.1.1] - 2026-07-31
 
 ### Added

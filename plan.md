@@ -2,8 +2,8 @@
 
 Status: **Live** — stack decision made and executed. **Rust**, single crate `dorean`, Linux-first,
 hand-rolled diffed renderer on `crossterm` (no ratatui), **OpenRouter free + NVIDIA hosted NIM** models,
-and a from-scratch agent harness (no pi/opencode code). Phases 0–6 are complete (the chat TUI ships);
-Phases 7–8 are in progress; Phase 9 (distribution via cargo-dist) is set up and verified locally. The
+and a from-scratch agent harness (no pi/opencode code). Phases 0–8 are complete (all target inventory
+ships); Phase 9 (distribution via cargo-dist) is set up and verified locally. The
 checkboxes below track the original target inventory against what actually ships today, and `phase.md`
 is the authoritative task list.
 Deliverable: a `plan.md` + `phase.md` that a coding agent executed to reproduce the TUI experience.
@@ -74,19 +74,19 @@ Core loop in `interactive-mode.ts`:
 - [x] Multi-line input (hard wrap, 200-entry deduped history, word nav, bracketed paste)
 - [ ] Multi-line editor with syntax awareness / undo stack / kill-ring (deferred)
 - [x] Slash-commands shipped: `/help /model /key /stack /make /thinking /todo /spec /clear /abort /quit`
-- [ ] Slash-commands remaining: `/copy /permission /theme /sessions /regenerate`
+- [x] Slash-commands remaining: `/copy /permission /theme /sessions /regenerate` — shipped (Phase 7)
 - [x] Autocomplete for **`@agentname`** mentions (Tab accept, Up/Down cycle); model selector has type-to-filter
 - [ ] Autocomplete for slash commands / files (deferred)
 - [x] **`@agentname` mention routing** — user→agent and agent→agent (`router.rs`)
-- [ ] External editor (`$EDITOR`)
+- [x] External editor (`$EDITOR` via Ctrl+E; suspends the TUI while editing)
 - [x] Clipboard paste (bracketed paste)
 
 ### Overlays / selectors (Esc or /command opens these)
 - [x] Model selector (grouped Free/OpenRouter, type-to-filter; also lists the whole free NVIDIA catalog)
 - [x] Trust/tool-approval selector (allow/ask/deny, deny-list)
 - [x] Stack selector (orchestration stack prompt)
-- [ ] Session selector (resume via `--continue` only)
-- [ ] Theme selector (OSC 11 bg detected; no theme switching yet)
+- [x] Session selector (loads a saved session back into the chat)
+- [x] Theme selector (`/theme` + auto/light/dark/JSON)
 - [ ] Settings selector
 - [x] Login/auth selector (`/key` masked-input overlay, stored to `~/.dorean/config.json`; also env `DOREAN_OPENROUTER_API_KEY` / `OPENROUTER_API_KEY`)
 - [ ] Show-images selector
@@ -101,7 +101,7 @@ Core loop in `interactive-mode.ts`:
 
 ### Keybindings (implemented subset of pi's defaults)
 - `Enter` send / `Ctrl+J` newline / `Ctrl+M` newline, `Ctrl+C` abort (or quit when idle), `Esc` abort/quit
-- `Ctrl+W` delete word, `Ctrl+U` clear line, `PageUp/PageDown` scroll history
+- `Ctrl+W` delete word, `Ctrl+U` clear line, `PageUp/PageDown` scroll history, `Ctrl+Z/Y` undo/redo, `Ctrl+E` external editor
 - `Tab` autocomplete (mentions), `Up/Down` history in input, `Ctrl+V` paste (bracketed)
 - Remaining: `Alt+Left/Right` word nav, `Ctrl+L` clear, `Ctrl+R` reload, double `Ctrl+C` exit
 
@@ -139,13 +139,13 @@ Core loop in `interactive-mode.ts`:
 - Streaming: assistant deltas, reasoning label, tool call/result bubbles, per-agent text, todo updates, usage.
 - **Exit met**: live conversation renders; streaming deltas update in place.
 
-### Phase 4 — Slash commands & selectors ◐ (partial)
+### Phase 4 — Slash commands & selectors ✅
 - Shipped: `/help /model /stack /todo /spec /clear /abort /orchestrate /quit`; model + stack + tool-approval selectors.
-- Remaining: `/copy /permission /theme /sessions /regenerate`, session/theme/settings/auth selectors (→ Phase 7).
+- Phase 7 closed the remaining commands and selectors (see below).
 
 ### Phase 5 — Polish & integration ◐ (partial)
-- Done: real agent harness wired (no stub — `agent_loop.rs` + tools + orchestration drive the UI); cost/token display; Ctrl+C abort.
-- Remaining: regenerate, copy/share/export, undo, update check, terminal title, double-Ctrl+C exit (→ Phase 7).
+- Done: real agent harness wired (no stub — `agent_loop.rs` + tools + orchestration drive the UI); cost/token display; Ctrl+C abort; regenerate; copy; undo.
+- Remaining: update check, terminal title, double-Ctrl+C exit (deferred).
 
 ---
 
@@ -201,6 +201,6 @@ Project artifacts the orchestration layer reads/writes (in the working repo):
 ## 7. Next Actions (current state — see `phase.md`)
 1. **Done:** stack decision, scaffold, terminal core, widgets, chat layout/event loop, real harness integration (Phases 0–3) — the TUI ships and is fully tested.
 2. **Done:** distribution — cargo-dist pipeline (Linux x86_64 + ARM64, shell installer + self-updater), `CHANGELOG.md`, README install docs; verified locally (Phase 9).
-3. **Doing:** Phase 7 polish — remaining slash commands (`/copy /permission /theme /sessions /regenerate`), session/theme/settings selectors, regenerate, clipboard copy, provider status hint.
-4. **Then:** Phase 8 hardening — golden `vt100` screen snapshots, resize/SIGWINCH tests, fuzz-ish malformed-SSE/huge-output/abort tests.
-5. **Then:** cut `v0.1.0` GitHub Release. **Done:** v0.1.0 released, and `v0.1.1` (NVIDIA provider) cut — `Cargo.toml` 0.1.1, Keep-a-Changelog `[0.1.1]`, tag at the release commit.
+3. **Done:** Phase 7 polish — all remaining slash commands (`/copy /permission /theme /sessions /regenerate`), session/theme selectors, regenerate, clipboard copy, provider status hint, Ctrl+Z/Y undo/redo, Ctrl+E external editor.
+4. **Done:** Phase 8 hardening — golden `vt100` screen snapshots (`tests/fixtures/`, `DOREAN_BLESS=1`), resize/SIGWINCH tests, fuzz-ish malformed-SSE/huge-output/abort tests, markdown span-boundary space regression. 224 unit + 22 integration tests green, clippy `-D warnings` and fmt clean.
+5. **Then:** cut `v0.1.2` GitHub Release (Phase 7/8 feature bundle). **Done:** v0.1.0 released, and `v0.1.1` (NVIDIA provider) cut — `Cargo.toml` 0.1.1, Keep-a-Changelog `[0.1.1]`, tag at the release commit.
