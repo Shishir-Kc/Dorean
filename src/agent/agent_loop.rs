@@ -201,6 +201,18 @@ impl AgentLoop {
         self.messages = messages;
     }
 
+    /// Discard everything after the last user message (for `/regenerate`) and
+    /// return that message's text, or `None` when the log has no user message.
+    pub fn truncate_to_last_user(&mut self) -> Option<String> {
+        let idx = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == crate::providers::client::Role::User)?;
+        let text = self.messages[idx].content.clone();
+        self.messages.truncate(idx);
+        Some(text)
+    }
+
     /// Run the loop with a fresh user message, returning the final summary.
     pub async fn run(&mut self, user_message: &str) -> Result<RunSummary, DoreanError> {
         self.messages.push(Message::user(user_message));

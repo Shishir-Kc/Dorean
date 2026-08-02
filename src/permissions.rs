@@ -48,6 +48,16 @@ impl std::str::FromStr for PermissionMode {
     }
 }
 
+impl fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PermissionMode::Allow => "allow",
+            PermissionMode::Ask => "ask",
+            PermissionMode::Deny => "deny",
+        })
+    }
+}
+
 /// The approval callback: given a human-readable prompt, returns whether the
 /// user approved the operation.
 pub type AskFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;

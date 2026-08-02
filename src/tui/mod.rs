@@ -13,6 +13,7 @@ pub mod theme;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::mpsc;
 
@@ -43,6 +44,13 @@ pub enum SessionCmd {
     FetchModels,
     /// Persist a new API key (for the active provider) and rebuild the agent.
     SetApiKey(String),
+    /// Change the tool-approval policy and rebuild the agent.
+    SetPermission(crate::permissions::PermissionMode),
+    /// Load a saved conversation into the agent (the `/sessions` picker).
+    LoadSession(Vec<crate::providers::client::Message>),
+    /// Replay the last user message: truncate the agent's history back to the
+    /// last user turn, then run it again.
+    Regenerate { text: String },
     /// Stop the background task.
     Shutdown,
 }
@@ -55,13 +63,11 @@ pub async fn run(config: &Config, resume: bool) -> Result<(), DoreanError> {
         ));
     }
 
-    let mut terminal = terminal::Terminal::enter()?;
+    let terminal = terminal::Terminal::enter()?;
     let mut theme = theme::Theme::detect(config);
     if let Some(detected) = theme::Theme::detect_from_terminal() {
         theme = detected;
     }
-    let _ = &mut terminal;
-    let _ = &mut theme;
 
     let cwd = std::env::current_dir()?;
     let abort = AbortHandle::new();
@@ -78,11 +84,20 @@ pub async fn run(config: &Config, resume: bool) -> Result<(), DoreanError> {
         reply_rx.recv().unwrap_or(false)
     }) as crate::permissions::AskFn;
 
-    // Terminal event reader thread.
+    // While an external $EDITOR owns the terminal the reader thread must not
+    // consume keys (the editor reads stdin itself). The app toggles this flag
+    // around `suspend()`/`resume()`.
+    let suspend = Arc::new(AtomicBool::new(false));
     let (term_tx, mut term_rx) = mpsc::unbounded_channel::<crossterm::event::Event>();
+    let suspend_for_reader = suspend.clone();
     std::thread::spawn(move || {
         loop {
-            if let Ok(event) = crossterm::event::read()
+            if suspend_for_reader.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                continue;
+            }
+            if crossterm::event::poll(std::time::Duration::from_millis(80)).unwrap_or(false)
+                && let Ok(event) = crossterm::event::read()
                 && term_tx.send(event).is_err()
             {
                 break;
@@ -113,10 +128,11 @@ pub async fn run(config: &Config, resume: bool) -> Result<(), DoreanError> {
         abort,
         resume,
     )?;
+    app.attach_terminal(terminal, suspend);
     let result = app.run(&mut term_rx).await;
     app.shutdown();
 
-    let _ = terminal.leave();
+    // The `Terminal` was moved into the app; its `Drop` restores the tty.
     let _ = io::stdout().flush();
 
     result?;
@@ -178,6 +194,29 @@ fn spawn_agent_task(
                         aborted: summary.aborted,
                     });
                 }
+                SessionCmd::Regenerate { text } => {
+                    abort.reset();
+                    // Drop the old reply (and any tool calls it made) from the
+                    // agent's context, then replay the user message.
+                    let _ = agent.truncate_to_last_user();
+                    let summary = match agent.run(&text).await {
+                        Ok(summary) => summary,
+                        Err(e) => {
+                            let _ = events_tx.send(TuiEvent::Error(format!("{e}")));
+                            continue;
+                        }
+                    };
+                    let record = crate::history::new_record(agent.model(), agent.messages.clone());
+                    let _ = crate::history::append_session(&cwd, &record);
+                    let _ = events_tx.send(TuiEvent::ChatFinished {
+                        turns: summary.turns,
+                        aborted: summary.aborted,
+                    });
+                }
+                SessionCmd::LoadSession(messages) => {
+                    agent.load_messages(messages);
+                    let _ = events_tx.send(TuiEvent::Notice("session loaded".to_string()));
+                }
                 SessionCmd::SetModel(model) => {
                     agent.set_model(Some(model.clone()));
                     let _ = events_tx.send(TuiEvent::Notice(format!("model → {model}")));
@@ -211,6 +250,21 @@ fn spawn_agent_task(
                             agent = fresh;
                             agent.set_stream_sink(Some(sink_tx.clone()));
                             let _ = events_tx.send(TuiEvent::Notice("API key saved".to_string()));
+                        }
+                        Err(e) => {
+                            let _ = events_tx.send(TuiEvent::Error(format!("{e}")));
+                        }
+                    }
+                }
+                SessionCmd::SetPermission(mode) => {
+                    config.permission_mode = Some(mode);
+                    match crate::agent::AgentLoop::with_cwd_and_ask(&config, &cwd, approve.clone())
+                    {
+                        Ok(fresh) => {
+                            agent = fresh;
+                            agent.set_stream_sink(Some(sink_tx.clone()));
+                            let _ = events_tx
+                                .send(TuiEvent::Notice(format!("permission mode → {mode}")));
                         }
                         Err(e) => {
                             let _ = events_tx.send(TuiEvent::Error(format!("{e}")));

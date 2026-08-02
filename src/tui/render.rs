@@ -239,10 +239,12 @@ impl Screen {
         out
     }
 
-    /// Write this frame to `stdout`, emitting only cells that differ from the
-    /// previous frame (passed in `prev`). The previous frame is updated in
-    /// place so the next call diffs against the just-emitted state.
-    pub fn flush(&self, stdout: &mut io::Stdout, prev: &mut Screen) -> io::Result<()> {
+    /// Write this frame, emitting only cells that differ from the previous
+    /// frame (passed in `prev`). The previous frame is updated in place so the
+    /// next call diffs against the just-emitted state. Generic over the
+    /// writer so tests can capture the ANSI byte stream (e.g. into a `vt100`
+    /// parser).
+    pub fn flush<W: Write>(&self, stdout: &mut W, prev: &mut Screen) -> io::Result<()> {
         prev.resize_like(self);
         let mut last_style: Option<(Color, Color, Attrs)> = None;
 
@@ -276,9 +278,9 @@ impl Screen {
         stdout.flush()
     }
 
-    fn emit_style(
+    fn emit_style<W: Write>(
         &self,
-        stdout: &mut io::Stdout,
+        stdout: &mut W,
         (fg, bg, attrs): (Color, Color, Attrs),
     ) -> io::Result<()> {
         queue!(

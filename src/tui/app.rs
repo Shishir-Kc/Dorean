@@ -2,8 +2,10 @@
 //! and keyboard-driven layout. Renders into a diffed [`Screen`] each frame.
 
 use std::collections::{HashMap, VecDeque};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -15,7 +17,9 @@ use crate::agent::stack::STACKS;
 use crate::agent::todos::TodoStatus;
 use crate::config::{Config, Provider};
 use crate::error::DoreanError;
-use crate::providers::client::Usage;
+use crate::history::SessionRecord;
+use crate::permissions::PermissionMode;
+use crate::providers::client::{Role, Usage};
 use crate::providers::default_model;
 
 use super::SessionCmd;
@@ -23,7 +27,8 @@ use super::components::message::draw_md_line;
 use super::components::{Input, Message, MessageKind, SelectList, ToolStatus, ToolUi};
 use super::events::TuiEvent;
 use super::render::{Attrs, Screen};
-use super::theme::Theme;
+use super::terminal::Terminal;
+use super::theme::{THEME_AUTO, Theme};
 
 /// Lifecycle of a sub-agent in the roster strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +43,9 @@ enum AgentStatus {
 enum SelectKind {
     Model,
     Stack,
+    PermMode,
+    Theme,
+    Session,
 }
 
 /// Modal overlays layered above the chat view.
@@ -48,6 +56,12 @@ enum Overlay {
     Model(SelectList),
     /// Filterable list of stack presets for `/make`.
     Stack(SelectList),
+    /// Tool-approval policy picker (`/permission`).
+    PermMode(SelectList),
+    /// Theme picker (`/theme`): auto/light/dark + custom JSON themes.
+    Theme(SelectList),
+    /// Saved-session picker (`/sessions`).
+    Sessions(SelectList),
     /// Per-sub-agent model assignment: pick a brain for each agent, then start.
     AgentModels { selected: usize },
     /// A tool-approval question awaiting an answer on `reply`.
@@ -120,6 +134,18 @@ pub struct App {
     agent_models: Option<Vec<AgentManifest>>,
     /// The roster index whose model the model selector is currently picking.
     pending_model_agent: Option<usize>,
+    /// Saved sessions backing the `/sessions` selector (agent, record),
+    /// newest first, matching the selector's item order.
+    sessions: Vec<(String, SessionRecord)>,
+    /// Current terminal size, updated on `Event::Resize` (and used by tests
+    /// to render frames deterministically).
+    term_size: (u16, u16),
+    /// Owned `Terminal` (alt screen + raw mode), so the app can suspend it
+    /// around an external `$EDITOR` and restore it afterwards.
+    terminal: Option<Terminal>,
+    /// Set while an external editor owns the terminal, so the event-reader
+    /// thread stops consuming keys.
+    suspend: Arc<AtomicBool>,
 }
 
 impl App {
@@ -156,6 +182,10 @@ impl App {
             pending_stack: None,
             agent_models: None,
             pending_model_agent: None,
+            sessions: Vec::new(),
+            term_size: Terminal::size(),
+            terminal: None,
+            suspend: Arc::new(AtomicBool::new(false)),
             config,
             cwd,
             theme,
@@ -197,6 +227,13 @@ impl App {
             }
         }
         Ok(app)
+    }
+
+    /// Take ownership of the terminal (moved from `tui::run`) so the app can
+    /// suspend it around an external `$EDITOR`.
+    pub fn attach_terminal(&mut self, terminal: Terminal, suspend: Arc<AtomicBool>) {
+        self.terminal = Some(terminal);
+        self.suspend = suspend;
     }
 
     /// Stop the background agent task.
@@ -252,7 +289,7 @@ impl App {
 
     fn handle_term_event(&mut self, event: Event) {
         match event {
-            Event::Resize(_, _) => {}
+            Event::Resize(width, height) => self.term_size = (width, height),
             Event::Paste(text) => match self.overlay.take() {
                 Some(Overlay::ApiKey { mut input }) => {
                     input.push_str(&text);
@@ -324,6 +361,11 @@ impl App {
             }
             Some(Overlay::Model(list)) => self.handle_select_key(key, list, SelectKind::Model),
             Some(Overlay::Stack(list)) => self.handle_select_key(key, list, SelectKind::Stack),
+            Some(Overlay::PermMode(list)) => {
+                self.handle_select_key(key, list, SelectKind::PermMode)
+            }
+            Some(Overlay::Theme(list)) => self.handle_select_key(key, list, SelectKind::Theme),
+            Some(Overlay::Sessions(list)) => self.handle_select_key(key, list, SelectKind::Session),
             Some(Overlay::AgentModels { selected }) => self.handle_agent_models_key(key, selected),
             Some(Overlay::ApiKey { input }) => self.handle_api_key_key(key, input),
             // Handled above: a pending permission prompt blocks all input.
@@ -374,6 +416,9 @@ impl App {
                     }
                 }
                 SelectKind::Stack => self.start_orchestration(value),
+                SelectKind::PermMode => self.apply_permission(&value),
+                SelectKind::Theme => self.apply_theme(&value),
+                SelectKind::Session => self.load_session(&value),
             },
             None if matches!(key.code, KeyCode::Esc) => {
                 // Esc in the model picker during an assignment returns to the
@@ -388,6 +433,9 @@ impl App {
                 self.overlay = Some(match kind {
                     SelectKind::Model => Overlay::Model(list),
                     SelectKind::Stack => Overlay::Stack(list),
+                    SelectKind::PermMode => Overlay::PermMode(list),
+                    SelectKind::Theme => Overlay::Theme(list),
+                    SelectKind::Session => Overlay::Sessions(list),
                 });
             }
         }
@@ -497,6 +545,19 @@ impl App {
                 self.mention = None;
             }
             KeyCode::Char('w') if ctrl => self.input.delete_word_left(),
+            KeyCode::Char('z') if ctrl => {
+                self.mention = None;
+                if !self.input.undo() {
+                    self.toast("nothing to undo", ToastKind::Info);
+                }
+            }
+            KeyCode::Char('y') if ctrl => {
+                self.mention = None;
+                if !self.input.redo() {
+                    self.toast("nothing to redo", ToastKind::Info);
+                }
+            }
+            KeyCode::Char('e') if ctrl => self.edit_in_editor(),
             KeyCode::Esc => {
                 if self.mention.is_some() {
                     self.mention = None;
@@ -625,6 +686,34 @@ impl App {
                     ToastKind::Info,
                 );
             }
+            "copy" => self.copy_last_reply(arg),
+            "permission" => {
+                if arg.is_empty() {
+                    let items = ["allow", "ask", "deny"]
+                        .iter()
+                        .map(|m| m.to_string())
+                        .collect();
+                    self.overlay =
+                        Some(Overlay::PermMode(SelectList::new("permission mode", items)));
+                } else {
+                    self.apply_permission(arg);
+                }
+            }
+            "theme" => {
+                if arg.is_empty() {
+                    let mut items = vec![
+                        THEME_AUTO.to_string(),
+                        "light".to_string(),
+                        "dark".to_string(),
+                    ];
+                    items.extend(Theme::custom_theme_names());
+                    self.overlay = Some(Overlay::Theme(SelectList::new("theme", items)));
+                } else {
+                    self.apply_theme(arg);
+                }
+            }
+            "sessions" => self.open_sessions_selector(),
+            "regenerate" => self.regenerate_last(),
             "make" => {
                 if arg.is_empty() {
                     self.toast("usage: /make <goal>", ToastKind::Error);
@@ -645,6 +734,255 @@ impl App {
                 format!("unknown command /{other} — try /help"),
                 ToastKind::Error,
             ),
+        }
+    }
+
+    /// `/copy [all]`: copy the last assistant/agent reply (or the whole
+    /// conversation) to the system clipboard.
+    fn copy_last_reply(&mut self, arg: &str) {
+        let text = if arg == "all" {
+            self.messages
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        m.kind,
+                        MessageKind::User | MessageKind::Assistant | MessageKind::Agent { .. }
+                    )
+                })
+                .map(|m| m.text.clone())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            self.messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m.kind, MessageKind::Assistant | MessageKind::Agent { .. }))
+                .map(|m| m.text.clone())
+                .unwrap_or_default()
+        };
+        if text.trim().is_empty() {
+            self.toast("nothing to copy yet", ToastKind::Error);
+            return;
+        }
+        match crate::clipboard::copy_text(&text) {
+            Ok(()) => self.toast(
+                format!("copied {} chars", text.chars().count()),
+                ToastKind::Success,
+            ),
+            Err(e) => self.toast(e, ToastKind::Error),
+        }
+    }
+
+    /// Apply a new tool-approval policy (`/permission` or its selector):
+    /// persists to config and rebuilds the agent's gatekeeper.
+    fn apply_permission(&mut self, raw: &str) {
+        match raw.parse::<PermissionMode>() {
+            Ok(mode) => {
+                self.config.permission_mode = Some(mode);
+                if let Err(e) = self.config.save() {
+                    self.toast(format!("failed to save config: {e}"), ToastKind::Error);
+                }
+                let _ = self.cmd_tx.send(SessionCmd::SetPermission(mode));
+                self.toast(format!("permission mode → {mode}"), ToastKind::Success);
+            }
+            Err(e) => self.toast(format!("{e}"), ToastKind::Error),
+        }
+    }
+
+    /// Apply a theme choice (`/theme` or its selector): `auto` re-detects from
+    /// the live terminal (OSC 11), `light`/`dark` are built in, anything else
+    /// must be a JSON theme in `$DOREAN_THEME_DIR`.
+    fn apply_theme(&mut self, raw: &str) {
+        let name = raw.trim().to_ascii_lowercase();
+        match name.as_str() {
+            THEME_AUTO => {
+                self.config.theme = None;
+                self.theme = if io::stdin().is_terminal() {
+                    Theme::detect_from_terminal().unwrap_or_else(|| Theme::detect(&self.config))
+                } else {
+                    Theme::detect(&self.config)
+                };
+            }
+            "light" | "dark" => {
+                self.config.theme = Some(name.clone());
+                self.theme = if name == "light" {
+                    Theme::light()
+                } else {
+                    Theme::dark()
+                };
+            }
+            _ => {
+                if Theme::load_custom(&name).is_none() {
+                    self.toast(
+                        format!(
+                            "theme `{name}` not found in {}",
+                            Theme::themes_dir().display()
+                        ),
+                        ToastKind::Error,
+                    );
+                    return;
+                }
+                self.config.theme = Some(name.clone());
+                self.theme = Theme::load_custom(&name).unwrap_or_else(Theme::dark);
+            }
+        }
+        if let Err(e) = self.config.save() {
+            self.toast(format!("failed to save config: {e}"), ToastKind::Error);
+        }
+        self.toast(
+            format!(
+                "theme → {}",
+                self.config.theme.as_deref().unwrap_or(THEME_AUTO)
+            ),
+            ToastKind::Success,
+        );
+    }
+
+    /// `/sessions`: list every saved session (all agents' logs, newest first)
+    /// and open the picker.
+    fn open_sessions_selector(&mut self) {
+        let mut records: Vec<(String, SessionRecord)> = Vec::new();
+        let dir = crate::history::sessions_dir(&self.cwd);
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "jsonl") {
+                    let agent = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                            if let Ok(record) = serde_json::from_str::<SessionRecord>(line) {
+                                records.push((agent.clone(), record));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if records.is_empty() {
+            self.toast("no saved sessions yet", ToastKind::Error);
+            return;
+        }
+        records.sort_by_key(|(_agent, record)| std::cmp::Reverse(record.created_at));
+        let items: Vec<String> = records
+            .iter()
+            .map(|(agent, record)| session_label(agent, record))
+            .collect();
+        self.sessions = records;
+        self.overlay = Some(Overlay::Sessions(SelectList::new("sessions", items)));
+    }
+
+    /// A session was chosen in the `/sessions` picker: load its conversation
+    /// into the chat and hand it to the background agent.
+    fn load_session(&mut self, label: &str) {
+        let Some((_agent, record)) = self
+            .sessions
+            .iter()
+            .find(|(agent, record)| session_label(agent, record) == label)
+        else {
+            self.toast("session not found", ToastKind::Error);
+            return;
+        };
+        let record = record.clone();
+        self.messages.clear();
+        for message in &record.messages {
+            match message.role {
+                Role::User => self.messages.push(Message::user(message.content.clone())),
+                Role::Assistant => self
+                    .messages
+                    .push(Message::assistant(message.content.clone())),
+                _ => {}
+            }
+        }
+        self.scroll = 0;
+        self.running = false;
+        self.turns = 0;
+        self.overlay = None;
+        self.model = record.model.clone();
+        let _ = self
+            .cmd_tx
+            .send(SessionCmd::LoadSession(record.messages.clone()));
+        let _ = self.cmd_tx.send(SessionCmd::SetModel(record.model));
+        self.toast("session loaded", ToastKind::Success);
+    }
+
+    /// `/regenerate`: drop everything after the last user message and replay
+    /// it, so the model produces a fresh reply.
+    fn regenerate_last(&mut self) {
+        if self.running {
+            self.toast(
+                "agent is running — press esc twice to abort",
+                ToastKind::Info,
+            );
+            return;
+        }
+        let Some(idx) = self
+            .messages
+            .iter()
+            .rposition(|m| matches!(m.kind, MessageKind::User))
+        else {
+            self.toast("no previous message to regenerate", ToastKind::Error);
+            return;
+        };
+        let text = self.messages[idx].text.clone();
+        self.messages.truncate(idx + 1);
+        self.running = true;
+        self.turns = 0;
+        let _ = self.cmd_tx.send(SessionCmd::Regenerate { text });
+    }
+
+    /// Ctrl+E: hand the current input to `$EDITOR` (default `vi`). The TUI
+    /// suspends the alternate screen, runs the editor, then resumes with the
+    /// edited text in the input.
+    fn edit_in_editor(&mut self) {
+        if self.running {
+            self.toast(
+                "agent is running — press esc twice to abort",
+                ToastKind::Info,
+            );
+            return;
+        }
+        let Some(mut terminal) = self.terminal.take() else {
+            self.toast("terminal unavailable", ToastKind::Error);
+            return;
+        };
+        if let Err(e) = terminal.leave() {
+            self.toast(format!("failed to suspend terminal: {e}"), ToastKind::Error);
+            self.terminal = Some(terminal);
+            return;
+        }
+        self.suspend.store(true, Ordering::SeqCst);
+        // Give the reader thread a beat to stop polling the tty.
+        std::thread::sleep(Duration::from_millis(60));
+
+        let result = run_external_editor(self.input.text());
+        let mut fatal = false;
+
+        self.suspend.store(false, Ordering::SeqCst);
+        match Terminal::enter() {
+            Ok(t) => self.terminal = Some(t),
+            Err(e) => {
+                // Cannot restore the TUI; bail out gracefully.
+                self.toast(
+                    format!("failed to re-enter terminal: {e}"),
+                    ToastKind::Error,
+                );
+                fatal = true;
+            }
+        }
+        match result {
+            Ok(Some(text)) => {
+                self.input.set_text(text);
+                self.mention = None;
+                self.toast("input edited", ToastKind::Success);
+            }
+            Ok(None) => self.toast("no changes", ToastKind::Info),
+            Err(e) => self.toast(e, ToastKind::Error),
+        }
+        if fatal {
+            self.quit = true;
         }
     }
 
@@ -1053,20 +1391,27 @@ impl App {
     fn input_width(&self) -> usize {
         // The app calls this with the current terminal width inside draw(); for
         // key handling we approximate with the terminal size.
-        let (cols, _) = super::terminal::Terminal::size();
+        let (cols, _) = self.term_size;
         (cols as usize).saturating_sub(2).max(1)
     }
 
     // --- Drawing -----------------------------------------------------------
 
     fn draw(&mut self) -> Result<(), DoreanError> {
+        let (cols, rows) = self.term_size;
+        let screen = self.render_frame(cols as usize, rows as usize)?;
+        let mut stdout = io::stdout();
+        screen.flush(&mut stdout, &mut self.prev)?;
+        Ok(())
+    }
+
+    /// Draw the full frame into a fresh [`Screen`]. Split from [`App::draw`]
+    /// so tests can render frames at a chosen size without a terminal.
+    fn render_frame(&mut self, width: usize, height: usize) -> Result<Screen, DoreanError> {
         let theme = self.theme;
         self.expire_toasts();
-        let (cols, rows) = super::terminal::Terminal::size();
-        let width = cols as usize;
-        let height = rows as usize;
         if width < 20 || height < 6 {
-            return Ok(());
+            return Ok(Screen::new(width.max(1), height.max(1), theme.bg));
         }
 
         let mut screen = Screen::new(width, height, theme.bg);
@@ -1101,9 +1446,7 @@ impl App {
         self.draw_overlays(&mut screen, width, height);
         self.draw_toasts(&mut screen, width);
 
-        let mut stdout = io::stdout();
-        screen.flush(&mut stdout, &mut self.prev)?;
-        Ok(())
+        Ok(screen)
     }
 
     fn draw_header(&mut self, screen: &mut Screen, width: usize) {
@@ -1117,8 +1460,29 @@ impl App {
         if self.usage.total_tokens > 0 {
             line.push_str(&format!("  ·  {} tok", self.usage.total_tokens));
         }
-        let clipped = Screen::clip(&line, width.saturating_sub(14));
+        // Provider status hint: warn when no API key is configured for the
+        // active provider (chat would fail; `/key` fixes it).
+        let key_missing = match self.config.provider {
+            Provider::OpenRouter => self.config.openrouter_api_key.is_none(),
+            Provider::Nvidia => self.config.nvidia_api_key.is_none(),
+        };
+        let hint = if key_missing {
+            " ⚠ no key (/key)"
+        } else {
+            ""
+        };
+
+        let clipped = Screen::clip(
+            &line,
+            width
+                .saturating_sub(14)
+                .saturating_sub(hint.chars().count()),
+        );
         screen.put_str(0, 0, &clipped, theme.fg, theme.status_bg, Attrs::none());
+        if key_missing {
+            let x = clipped.chars().count();
+            screen.put_str(x, 0, hint, theme.warning, theme.status_bg, Attrs::bold());
+        }
 
         let (glyph, color) = if self.running {
             let spin = ['◐', '◓', '◑', '◒'][self.animate as usize % 4];
@@ -1351,6 +1715,18 @@ impl App {
                 Self::draw_list(screen, &theme, &mut list, width, height);
                 self.overlay = Some(Overlay::Stack(list));
             }
+            Overlay::PermMode(mut list) => {
+                Self::draw_list(screen, &theme, &mut list, width, height);
+                self.overlay = Some(Overlay::PermMode(list));
+            }
+            Overlay::Theme(mut list) => {
+                Self::draw_list(screen, &theme, &mut list, width, height);
+                self.overlay = Some(Overlay::Theme(list));
+            }
+            Overlay::Sessions(mut list) => {
+                Self::draw_list(screen, &theme, &mut list, width, height);
+                self.overlay = Some(Overlay::Sessions(list));
+            }
             Overlay::AgentModels { selected } => {
                 self.draw_agent_models(screen, &theme, width, height, selected);
                 self.overlay = Some(Overlay::AgentModels { selected });
@@ -1539,8 +1915,8 @@ impl App {
     }
 
     fn draw_help(screen: &mut Screen, theme: &Theme, width: usize, height: usize) {
-        let bw = 62usize.min(width);
-        let bh = 17usize.min(height);
+        let bw = 66usize.min(width);
+        let bh = 24usize.min(height);
         let (bx, by, bw, bh) = centered_box(width, height, bw, bh);
         screen.box_border(bx, by, bw, bh, theme);
         screen.put_str(
@@ -1556,11 +1932,18 @@ impl App {
             ("esc", "abort run (esc twice) · close overlay"),
             ("ctrl+c", "quit"),
             ("ctrl+u", "clear input · ctrl+w delete word"),
+            ("ctrl+z/y", "undo / redo input edits"),
+            ("ctrl+e", "edit input in $EDITOR"),
             ("↑/↓", "history or cursor · select in menus"),
             ("pgup/pgdn", "scroll the chat"),
             ("tab", "complete @agent mention"),
             ("/model", "switch model"),
-            ("/key", "set openrouter api key"),
+            ("/key", "set api key"),
+            ("/permission", "allow / ask / deny tool approval"),
+            ("/theme", "auto · light · dark · JSON themes"),
+            ("/sessions", "resume a saved session"),
+            ("/copy", "copy last reply (all = whole chat)"),
+            ("/regenerate", "replay the last message"),
             ("/make <goal>", "parallel sub-agent build (+ model picker)"),
             ("/thinking", "show / hide the reasoning block"),
             ("/todo /spec", "todo panel · plan view"),
@@ -1732,10 +2115,91 @@ fn centered_box(width: usize, height: usize, w: usize, h: usize) -> (usize, usiz
     (x, y, w.min(width), h.min(height))
 }
 
+/// Run `$EDITOR` (fallback `vi`) on a temp file seeded with `initial`.
+/// Returns `Ok(Some(text))` when the file changed, `Ok(None)` when untouched.
+/// The caller must have suspended the TUI's terminal first.
+fn run_external_editor(initial: &str) -> Result<Option<String>, String> {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let path = std::env::temp_dir().join(format!("dorean-edit-{}.txt", std::process::id()));
+    std::fs::write(&path, initial).map_err(|e| format!("cannot write temp file: {e}"))?;
+
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi").to_string();
+    let args: Vec<&str> = parts.collect();
+    let status = std::process::Command::new(&program)
+        .args(&args)
+        .arg(&path)
+        .status()
+        .map_err(|e| format!("cannot start {program}: {e}"))?;
+
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read temp file: {e}"))?;
+    let _ = std::fs::remove_file(&path);
+    if !status.success() {
+        return Err(format!("editor exited with {status}"));
+    }
+    Ok((text != initial).then_some(text))
+}
+
+/// A one-line label for a saved session in the `/sessions` picker:
+/// `2026-08-02 14:32 · <agent> · 5 msgs · "first user line…"`.
+fn session_label(agent: &str, record: &SessionRecord) -> String {
+    let stamp = format_timestamp(record.created_at);
+    let first = record
+        .messages
+        .iter()
+        .find(|m| m.role == Role::User)
+        .map(|m| {
+            let line = m.content.lines().next().unwrap_or_default().trim();
+            Screen::clip(line, 36)
+        })
+        .unwrap_or_default();
+    format!(
+        "{stamp} · {agent} · {} msgs · \"{first}\"",
+        record.messages.len()
+    )
+}
+
+/// Civil date/time for a unix timestamp (UTC, Howard Hinnant's algorithm).
+fn format_timestamp(ts: u64) -> String {
+    let days = (ts / 86_400) as i64;
+    let seconds = ts % 86_400;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    let (h, mi, s) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    format!("{year:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_civil_timestamps() {
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00:00");
+        assert_eq!(format_timestamp(1_700_000_000), "2023-11-14 22:13:20");
+        assert_eq!(
+            format_timestamp(1_700_000_000 + 86_400),
+            "2023-11-15 22:13:20"
+        );
+        assert_eq!(format_timestamp(86_400 - 1), "1970-01-01 23:59:59");
+    }
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
     use crate::agent::AbortHandle;
+    use serial_test::serial;
 
     fn test_app() -> App {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
