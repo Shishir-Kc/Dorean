@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::Provider;
 use crate::error::DoreanError;
 
 /// Schema for one sub-agent.
@@ -27,6 +28,9 @@ pub struct AgentManifest {
     pub owned_paths: Vec<PathBuf>,
     /// Optional model override (e.g. a cheaper model for a big role).
     pub model: Option<String>,
+    /// Optional provider override (set by the `/make` model picker when the
+    /// chosen model lives on another provider). `None` = main provider.
+    pub provider: Option<Provider>,
 }
 
 /// Resolve an owned path against the working directory.
@@ -82,6 +86,7 @@ mod tests {
             allowed_tools: Some(vec!["read".to_string(), "write".to_string()]),
             owned_paths: vec![PathBuf::from("backend")],
             model: Some("meta-llama/llama-3.3-70b-instruct:free".to_string()),
+            provider: None,
         }];
 
         write_roster(&dir, &agents).unwrap();

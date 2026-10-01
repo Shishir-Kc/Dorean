@@ -21,7 +21,7 @@ pub struct Cli {
     #[arg(short = 'c', long = "continue")]
     pub resume: bool,
 
-    /// Override the provider from config (`openrouter` | `nvidia`).
+    /// Override the provider from config (`openrouter` | `nvidia` | `deepseek` | `local` | `generic`).
     #[arg(long = "provider", value_name = "PROVIDER")]
     pub provider: Option<Provider>,
 
@@ -48,6 +48,11 @@ pub struct Cli {
     /// Tool approval policy: allow | ask | deny.
     #[arg(long = "permission", value_name = "MODE")]
     pub permission: Option<PermissionMode>,
+
+    /// List models from every provider (with per-provider errors) and exit.
+    /// Diagnostics for `/model`: shows exactly what each catalog returned.
+    #[arg(long = "list-models")]
+    pub list_models: bool,
 }
 
 #[cfg(test)]
@@ -124,5 +129,12 @@ mod tests {
         let cli = Cli::try_parse_from(["dorean", "-m", "x", "--permission", "allow"]).unwrap();
         assert_eq!(cli.permission, Some(PermissionMode::Allow));
         assert!(Cli::try_parse_from(["dorean", "--permission", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn parses_list_models_flag() {
+        let cli = Cli::try_parse_from(["dorean", "--list-models"]).unwrap();
+        assert!(cli.list_models);
+        assert!(!Cli::try_parse_from(["dorean"]).unwrap().list_models);
     }
 }

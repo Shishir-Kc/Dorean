@@ -37,6 +37,28 @@ async fn run(cli: Cli) -> Result<(), DoreanError> {
         config.permission_mode = Some(mode);
     }
 
+    // Non-interactive catalog check (diagnostics for `/model`): prints what
+    // every provider returned, including per-provider errors, then exits.
+    if cli.list_models {
+        let fetched = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            dorean::providers::fetch_all_models(&config),
+        )
+        .await
+        .map_err(|_| {
+            DoreanError::Message(
+                "listing models timed out after 60s (check network / proxy)".to_string(),
+            )
+        })?;
+        print!("{}", dorean::providers::format_fetch_report(&fetched));
+        if fetched.tagged.is_empty() {
+            return Err(DoreanError::Message(
+                "no models from any provider".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
     match &cli.message {
         Some(message) => {
             // Non-interactive runs default to Allow; the TUI defaults to Ask.

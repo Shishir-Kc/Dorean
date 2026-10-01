@@ -1,8 +1,59 @@
 # Changelog
 
+## [0.2.0] - Unreleased
+
+### Fixed
+
+- Hung streams no longer wedge the app: SSE reads have a 5-minute idle
+  watchdog that fails the turn as a retryable error (transient stalls
+  recover via backoff; persistent ones end loudly instead of spinning
+  forever with chat dead and aborts unreachable)
+- `/model` fetch runs detached from the command queue with a 45s watchdog,
+  so it can never queue behind a long/wedged chat run; arrivals carry a
+  fetch id and superseded responses are ignored instead of populating the
+  wrong picker or killing a newer spinner
+- Abort now lands within ~1s even on a fully stalled stream (short polls
+  with accumulated silence instead of one unbounded await)
+- New `dorean --list-models` diagnostic: prints per-provider model counts
+  and errors without the TUI (ground truth for `/model` issues)
+
 ## [Unreleased]
 
 ### Added
+
+- Providers: native DeepSeek (`--provider deepseek`, disk-cache-friendly
+  prefix-stable prompts), local Ollama (`--provider local`), and generic
+  OpenAI-compatible endpoints (`--provider generic` via `DOREAN_BASE_URL`);
+  dual-model `executor_model` / `planner_model` (sub-agents default to the
+  cheap executor unless explicitly picked)
+- Speed: consecutive read-only tools (`read`/`glob`/`grep`/`list`/`bash_poll`)
+  run concurrently; pooled HTTP keepalive; prompt prefix is byte-stable across
+  turns (hour-rounded timestamps, sorted tool docs) for prefix/cache hits
+- Efficiency: token meter with cache-hit tracking, stale tool-output pruning,
+  and auto-compaction (`DOREAN_COMPACT_THRESHOLD`, `DOREAN_AUTO_COMPACT=off`
+  to disable); project memory from `AGENTS.md`/`CLAUDE.md` plus
+  `.dorean/skills/*/SKILL.md`
+- Responsiveness: `bash_background` + `bash_poll`/`bash_kill` background tasks,
+  per-turn file checkpoints (`checkpoints.rs`), Codex-style `suggest` /
+  `auto-edit` / `full-auto` sandbox presets
+- Extensibility: lifecycle hooks (`.dorean/hooks.json`, exit-2 denies),
+  MCP server registry (`.dorean/mcp.json`, `mcp__<server>__<tool>`), git
+  worktree helper for sub-agent isolation
+- Perf regression gate: `tests/perf.rs` (prefix stability, parallel batch,
+  compaction shrink)
+- `/key` opens a provider picker (all 5 providers, key status shown) and the
+  key entry is scoped to the picked provider; picking switches immediately
+  (`/key <provider>` jumps straight there; local skips key entry)
+- `/model` aggregates every provider's full catalog in parallel (free first),
+  choosing a row switches provider + model together; unreachable providers
+  are skipped with actionable hints (e.g. `ollama serve`) instead of an
+  empty/failed list; DeepSeek lists its full catalog (was empty under
+  free-only filtering); provider/key switches preserve chat context
+- Model-fetch hardening: aggregation extracted to testable
+  `providers::fetch_all_models` (wiremock-covered incl. total-outage
+  messaging), live-catalog fixture locks the OpenRouter parser against the
+  real 2026 response shape, and fetch errors name a custom `DOREAN_BASE_URL`
+  explicitly since it reroutes hosted listings too
 
 - `/copy [all]` copies the last assistant reply (or the whole session) via OSC 52
   with wl-copy/xclip/xsel fallbacks

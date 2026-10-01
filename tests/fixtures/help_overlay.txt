@@ -9,8 +9,8 @@
        │ ↑/↓                     history or cursor · select in menus    │
        │ pgup/pgdn               scroll the chat                        │
        │ tab                     complete @agent mention                │
-       │ /model                  switch model                           │
-       │ /key                    set api key                            │
+       │ /model                  switch model (all providers)           │
+       │ /key                    pick provider + set api key            │
        │ /permission             allow / ask / deny tool approval       │
        │ /theme                  auto · light · dark · JSON themes      │
        │ /sessions               resume a saved session                 │

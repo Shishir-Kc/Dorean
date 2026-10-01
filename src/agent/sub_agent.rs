@@ -179,7 +179,20 @@ pub async fn run(settings: SubAgentSettings) -> Result<SubAgentResult, DoreanErr
         .allowed_tools
         .as_ref()
         .map(|v| v.iter().map(|s| s.as_str()).collect())
-        .unwrap_or_else(|| vec!["read", "write", "edit", "bash", "glob", "grep", "list"]);
+        .unwrap_or_else(|| {
+            vec![
+                "read",
+                "write",
+                "edit",
+                "bash",
+                "bash_background",
+                "bash_poll",
+                "bash_kill",
+                "glob",
+                "grep",
+                "list",
+            ]
+        });
     let mut tools = ToolRegistry::builtin_filtered(&allowed);
     tools.register(TodoTool::new(cwd.clone(), name.clone()));
 
@@ -195,9 +208,22 @@ pub async fn run(settings: SubAgentSettings) -> Result<SubAgentResult, DoreanErr
         .unwrap_or(crate::permissions::PermissionMode::Allow);
     let policy = PermissionPolicy::for_owned_paths(mode, &cwd, &owned, &config.permission_deny);
 
-    let mut agent = AgentLoop::custom(&config, &cwd, tools, policy)?;
+    let mut agent_config = config.clone();
+    // Cross-provider pick from the `/make` model picker: run this sub-agent
+    // against its own provider instead of the main one.
+    if let Some(provider) = &manifest.provider {
+        agent_config.provider = *provider;
+    }
+    let mut agent = AgentLoop::custom(&agent_config, &cwd, tools, policy)?;
     agent.set_abort(abort.clone());
-    agent.set_model(manifest.model.clone());
+    // Dual-model: explicit manifest pick wins, then executor_model (cheap),
+    // then the loop's own config.model/provider default.
+    agent.set_model(
+        manifest
+            .model
+            .clone()
+            .or_else(|| config.executor_model.clone()),
+    );
     agent.set_agent_identity(AgentIdentity {
         name: name.clone(),
         role: manifest.role.clone(),

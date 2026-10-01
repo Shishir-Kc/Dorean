@@ -87,6 +87,9 @@ impl NvidiaProvider {
     fn http_client() -> reqwest::Client {
         reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
+            .pool_max_idle_per_host(8)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build http client")
     }

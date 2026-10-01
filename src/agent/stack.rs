@@ -43,6 +43,7 @@ pub fn build_roster(stack: &str, goal: &str) -> Result<Vec<AgentManifest>, Dorea
                 .map(|v| v.iter().map(|s| s.to_string()).collect()),
             owned_paths: t.owned_paths.iter().map(PathBuf::from).collect(),
             model: None,
+            provider: None,
         })
         .collect())
 }

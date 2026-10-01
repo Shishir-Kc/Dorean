@@ -36,14 +36,23 @@ pub enum SessionCmd {
     },
     /// Set the model for subsequent chat runs.
     SetModel(String),
+    /// Switch the active provider and rebuild the agent (chat context is
+    /// preserved across the rebuild).
+    SetProvider(crate::config::Provider),
     /// Start a fresh agent loop (drops in-memory context).
     Clear,
     /// Abort the current run (via the shared [`AbortHandle`]).
     Abort,
-    /// Fetch the free model list for the model selector.
-    FetchModels,
-    /// Persist a new API key (for the active provider) and rebuild the agent.
-    SetApiKey(String),
+    /// Fetch the model list from every provider in parallel for the model
+    /// selector. Runs detached so it never queues behind chat: unreachables
+    /// are skipped, never fatal. `id` echoes back in the response events.
+    FetchModels { id: u64 },
+    /// Persist a new API key for the given provider and rebuild the agent
+    /// (chat context is preserved across the rebuild).
+    SetApiKey {
+        provider: crate::config::Provider,
+        key: String,
+    },
     /// Change the tool-approval policy and rebuild the agent.
     SetPermission(crate::permissions::PermissionMode),
     /// Load a saved conversation into the agent (the `/sessions` picker).
@@ -221,6 +230,24 @@ fn spawn_agent_task(
                     agent.set_model(Some(model.clone()));
                     let _ = events_tx.send(TuiEvent::Notice(format!("model → {model}")));
                 }
+                SessionCmd::SetProvider(provider) => {
+                    // Preserve chat context across the rebuild (same as /key).
+                    let history = agent.messages.clone();
+                    config.provider = provider;
+                    match crate::agent::AgentLoop::with_cwd_and_ask(&config, &cwd, approve.clone())
+                    {
+                        Ok(fresh) => {
+                            agent = fresh;
+                            agent.load_messages(history);
+                            agent.set_stream_sink(Some(sink_tx.clone()));
+                            let _ =
+                                events_tx.send(TuiEvent::Notice(format!("provider → {provider}")));
+                        }
+                        Err(e) => {
+                            let _ = events_tx.send(TuiEvent::Error(format!("{e}")));
+                        }
+                    }
+                }
                 SessionCmd::Clear => {
                     abort.reset();
                     match crate::agent::AgentLoop::with_cwd_and_ask(&config, &cwd, approve.clone())
@@ -237,17 +264,30 @@ fn spawn_agent_task(
                 SessionCmd::Abort => {
                     abort.abort();
                 }
-                SessionCmd::SetApiKey(key) => {
-                    match config.provider {
+                SessionCmd::SetApiKey { provider, key } => {
+                    // Preserve chat context across the rebuild.
+                    let history = agent.messages.clone();
+                    config.provider = provider;
+                    match provider {
                         crate::config::Provider::OpenRouter => {
                             config.openrouter_api_key = Some(key.clone())
                         }
-                        crate::config::Provider::Nvidia => config.nvidia_api_key = Some(key),
+                        crate::config::Provider::Nvidia => {
+                            config.nvidia_api_key = Some(key.clone())
+                        }
+                        crate::config::Provider::DeepSeek => {
+                            config.deepseek_api_key = Some(key.clone())
+                        }
+                        crate::config::Provider::Generic => {
+                            config.generic_api_key = Some(key.clone())
+                        }
+                        crate::config::Provider::Local => {}
                     }
                     match crate::agent::AgentLoop::with_cwd_and_ask(&config, &cwd, approve.clone())
                     {
                         Ok(fresh) => {
                             agent = fresh;
+                            agent.load_messages(history);
                             agent.set_stream_sink(Some(sink_tx.clone()));
                             let _ = events_tx.send(TuiEvent::Notice("API key saved".to_string()));
                         }
@@ -271,19 +311,55 @@ fn spawn_agent_task(
                         }
                     }
                 }
-                SessionCmd::FetchModels => {
-                    // Model listing works even without a key on OpenRouter, and
-                    // is attempted keyless on NVIDIA too, so /model always
-                    // opens. Chat itself still needs /key.
-                    let provider = crate::providers::AnyProvider::for_model_listing(&config);
-                    match provider.list_free_models().await {
-                        Ok(models) => {
-                            let _ = events_tx.send(TuiEvent::ModelList(models));
+                SessionCmd::FetchModels { id } => {
+                    // Detached: model listing is read-only, so it must never
+                    // queue behind a long chat/orchestration run (a wedged
+                    // queue is exactly the forever-spinner). Hard watchdog on
+                    // top of fetch_all_models' per-provider caps.
+                    let cfg = config.clone();
+                    let tx = events_tx.clone();
+                    tokio::spawn(async move {
+                        let fetched = tokio::time::timeout(
+                            std::time::Duration::from_secs(45),
+                            crate::providers::fetch_all_models(&cfg),
+                        )
+                        .await;
+                        match fetched {
+                            Ok(f) if !f.tagged.is_empty() => {
+                                if !f.problems.is_empty() {
+                                    let _ = tx.send(TuiEvent::Notice(format!(
+                                        "skipped: {}",
+                                        f.problems.join("; ")
+                                    )));
+                                }
+                                let _ = tx.send(TuiEvent::ModelList {
+                                    id,
+                                    models: f.tagged,
+                                });
+                            }
+                            Ok(f) => {
+                                let base = cfg
+                                    .base_url
+                                    .as_deref()
+                                    .map(|u| format!(" DOREAN_BASE_URL={u};"))
+                                    .unwrap_or_default();
+                                let _ = tx.send(TuiEvent::ModelListFailed {
+                                    id,
+                                    message: format!(
+                                        "couldn't fetch models from any provider ({}).{base} check network access, then keys via /key",
+                                        f.problems.join("; ")
+                                    ),
+                                });
+                            }
+                            Err(_) => {
+                                let _ = tx.send(TuiEvent::ModelListFailed {
+                                    id,
+                                    message: "fetching models timed out after 45s (check network / proxy)"
+                                        .to_string(),
+                                });
+                            }
                         }
-                        Err(e) => {
-                            let _ = events_tx.send(TuiEvent::ModelListFailed(format!("{e}")));
-                        }
-                    }
+                    });
                 }
                 SessionCmd::Orchestrate {
                     goal,

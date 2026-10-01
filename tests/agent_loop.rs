@@ -76,6 +76,29 @@ async fn mount_round_trip_mocks(server: &MockServer) {
 }
 
 #[tokio::test]
+async fn stalled_stream_fails_instead_of_hanging_forever() {
+    let server = MockServer::start().await;
+    // Stall headers+body past any reasonable wait: without an idle watchdog
+    // this test would hang as long as the production TUI did.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(FINAL_BODY)
+                .set_delay(std::time::Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = temp_dir("stall");
+    let mut agent = dorean::agent::AgentLoop::with_cwd(&config(&server), &dir).unwrap();
+    agent.set_stream_idle_timeout(std::time::Duration::from_millis(100));
+    let err = agent.run("hi").await.unwrap_err();
+    assert!(err.to_string().contains("stalled"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn agent_loop_runs_tool_round_trip() {
     let server = MockServer::start().await;
     mount_round_trip_mocks(&server).await;
@@ -170,22 +193,37 @@ async fn abort_stops_before_first_turn() {
 
 #[tokio::test]
 async fn abort_mid_stream_keeps_partial_text() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(std::time::Duration::from_millis(1000))
-                .set_body_string(
-                    "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n\
-                     data: [DONE]\n\n",
-                ),
-        )
-        .mount(&server)
-        .await;
+    // Raw TCP mock: one text delta immediately, then silence (never DONE).
+    // This is the production wedge: without abort-aware polling the loop
+    // would hang here forever and never notice the abort.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 8192];
+        let _ = socket.read(&mut buf).await;
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+            .await
+            .unwrap();
+        socket
+            .write_all(b"data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    });
 
     let dir = temp_dir("abort-mid");
     let abort = AbortHandle::new();
+    let config = Config {
+        provider: Provider::OpenRouter,
+        base_url: Some(format!("http://{addr}")),
+        openrouter_api_key: Some("sk-test".to_string()),
+        permission_mode: Some(dorean::permissions::PermissionMode::Allow),
+        ..Config::default()
+    };
     let options = RunOptions {
         message: "tell me",
         print: false,
@@ -198,11 +236,14 @@ async fn abort_mid_stream_keeps_partial_text() {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         later_abort.abort();
     });
-    // Abort while the response is still in flight; the between-events check in
-    // the loop notices it after the first chunk and stops early.
-    let summary = dorean::agent::run_once(&config(&server), &options)
-        .await
-        .unwrap();
+    // Abort lands within ~1s of the stall and the partial text survives.
+    let summary = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        dorean::agent::run_once(&config, &options),
+    )
+    .await
+    .expect("abort must resolve promptly on a stalled stream")
+    .unwrap();
     assert!(summary.aborted);
     assert_eq!(summary.turns, 1);
     assert_eq!(summary.response, "hello");

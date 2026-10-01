@@ -7,6 +7,7 @@
 //! message.
 
 pub mod bash;
+pub mod bash_bg;
 pub mod edit;
 pub mod glob;
 pub mod grep;
@@ -104,16 +105,31 @@ pub struct ToolRegistry {
 impl ToolRegistry {
     /// The standard tool set.
     pub fn builtin() -> Self {
-        Self::builtin_filtered(&["read", "write", "edit", "bash", "glob", "grep", "list"])
+        Self::builtin_filtered(&[
+            "read",
+            "write",
+            "edit",
+            "bash",
+            "bash_background",
+            "bash_poll",
+            "bash_kill",
+            "glob",
+            "grep",
+            "list",
+        ])
     }
 
     /// The standard tool set restricted to `allowed` names (sub-agents).
     pub fn builtin_filtered(allowed: &[&str]) -> Self {
+        let bg_store = bash_bg::BackgroundStore::new();
         let all: Vec<Box<dyn Tool>> = vec![
             Box::new(read::ReadTool::new()),
             Box::new(write::WriteTool::new()),
             Box::new(edit::EditTool::new()),
             Box::new(bash::BashTool::new()),
+            Box::new(bash_bg::BashBackgroundTool::new(bg_store.clone())),
+            Box::new(bash_bg::BashPollTool::new(bg_store.clone())),
+            Box::new(bash_bg::BashKillTool::new(bg_store)),
             Box::new(glob::GlobTool::new()),
             Box::new(grep::GrepTool::new()),
             Box::new(list::ListTool::new()),
@@ -171,10 +187,21 @@ mod tests {
     #[test]
     fn default_registry_has_all_tools() {
         let registry = ToolRegistry::builtin();
-        for name in ["read", "write", "edit", "bash", "glob", "grep", "list"] {
+        for name in [
+            "read",
+            "write",
+            "edit",
+            "bash",
+            "bash_background",
+            "bash_poll",
+            "bash_kill",
+            "glob",
+            "grep",
+            "list",
+        ] {
             assert!(registry.get(name).is_some(), "missing tool {name}");
         }
-        assert_eq!(registry.specs().len(), 7);
+        assert_eq!(registry.specs().len(), 10);
     }
 
     #[test]

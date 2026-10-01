@@ -11,8 +11,9 @@ use tokio::sync::mpsc;
 
 use crate::agent::context::RepoContext;
 use crate::agent::events::StreamEvent;
-use crate::agent::prompts;
+use crate::agent::token_meter::TokenMeter;
 use crate::agent::tools::{Tool, ToolContext, ToolRegistry};
+use crate::agent::{compact, memory, prompts};
 use crate::config::Config;
 use crate::error::DoreanError;
 use crate::permissions::PermissionPolicy;
@@ -88,7 +89,22 @@ pub struct AgentLoop {
     /// When set, the loop runs as a confined sub-agent.
     agent: Option<AgentIdentity>,
     model_override: Option<String>,
+    /// Running token totals (provider usage folded in per turn).
+    meter: TokenMeter,
+    /// Project memory (AGENTS.md/CLAUDE.md/skills), loaded once per loop.
+    project_memory: String,
+    /// Lifecycle hooks from `.dorean/hooks.json`, loaded once per loop.
+    hooks: Vec<crate::agent::hooks::Hook>,
+    /// Max silence between SSE events before a turn is failed as stalled.
+    /// Without this a blackholed stream pends forever, wedging the whole
+    /// background task (chat dead, queued commands never run, aborts
+    /// unreachable). Expiry is retryable, so transient stalls recover.
+    stream_idle_timeout: Duration,
 }
+
+/// Silence allowance between stream events (generous: reasoning models can
+/// legitimately pause a minute+ between deltas).
+pub const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Result of one model turn.
 struct TurnResult {
@@ -128,6 +144,8 @@ impl AgentLoop {
         tools: ToolRegistry,
         permissions: PermissionPolicy,
     ) -> Result<Self, DoreanError> {
+        let project_memory = memory::ProjectMemory::load(cwd).text;
+        let hooks = crate::agent::hooks::load_hooks(cwd);
         Ok(AgentLoop {
             provider: AnyProvider::from_config(config)?,
             config: config.clone(),
@@ -143,6 +161,10 @@ impl AgentLoop {
             stream_tx: None,
             agent: None,
             model_override: None,
+            meter: TokenMeter::new(),
+            project_memory,
+            hooks,
+            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
         })
     }
 
@@ -201,6 +223,21 @@ impl AgentLoop {
         self.messages = messages;
     }
 
+    /// Override the idle watchdog (tests use milliseconds).
+    pub fn set_stream_idle_timeout(&mut self, timeout: Duration) {
+        self.stream_idle_timeout = timeout;
+    }
+
+    /// Token totals for this loop (provider usage folded in per turn).
+    pub fn meter(&self) -> &TokenMeter {
+        &self.meter
+    }
+
+    /// One-line token/cost status for headers and footers.
+    pub fn token_summary(&self) -> String {
+        self.meter.summary()
+    }
+
     /// Discard everything after the last user message (for `/regenerate`) and
     /// return that message's text, or `None` when the log has no user message.
     pub fn truncate_to_last_user(&mut self) -> Option<String> {
@@ -233,8 +270,20 @@ impl AgentLoop {
                 });
             }
 
+            // Context maintenance first: prune stale tool output, then compact
+            // the head when estimates exceed the threshold (unless disabled).
+            // This keeps long runs fast and cache-friendly instead of dying at
+            // the turn budget with a blown context.
+            compact::prune_tool_results(&mut self.messages);
+            if self.config.auto_compact && self.config.compact_threshold > 0 {
+                let est = crate::agent::token_meter::estimate_messages(&self.messages);
+                if compact::needs_compaction(est, self.config.compact_threshold) {
+                    compact::compact_messages(&mut self.messages, compact::KEEP_TAIL_MESSAGES);
+                }
+            }
+
             let tools = self.tools.specs();
-            let system = match &self.agent {
+            let mut system = match &self.agent {
                 Some(id) => prompts::agent_prompt(
                     &self.cwd,
                     &self.repo,
@@ -246,6 +295,10 @@ impl AgentLoop {
                 ),
                 None => prompts::system_prompt(&self.cwd, &self.repo, &tools),
             };
+            if !self.project_memory.trim().is_empty() {
+                system.push_str("\n## Project memory\n");
+                system.push_str(&self.project_memory);
+            }
             let mut messages = vec![Message::system(system)];
             messages.extend(self.messages.clone());
 
@@ -258,7 +311,8 @@ impl AgentLoop {
             };
 
             let result = self.stream_turn(request).await?;
-            usage = result.usage;
+            usage = result.usage.clone();
+            self.meter.add_usage(&result.usage);
             last_text = result.text.clone();
 
             if result.aborted {
@@ -288,8 +342,11 @@ impl AgentLoop {
             }
 
             // The model wants tools. Record its request, then run every call
-            // (tool execution is local and fast; abort is honored on the next
-            // turn boundary) so the message log never holds dangling calls.
+            // so the message log never holds dangling calls. Consecutive
+            // read-only calls (read/glob/grep/list) run concurrently via
+            // join_all — typically 3-4x faster than serial on investigation
+            // turns — while write/edit/bash stay serial to preserve ordering
+            // semantics. Abort is honored between batches.
             self.messages
                 .push(Message::assistant(result.text, result.calls.clone()));
 
@@ -303,13 +360,43 @@ impl AgentLoop {
                     name: call.name.clone(),
                     summary: tool_brief(call),
                 });
-                let output = self.tools.run(&ctx, call).await;
-                self.emit(StreamEvent::ToolResult {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    output: output.clone(),
-                });
-                self.messages.push(Message::tool(call.id.clone(), output));
+            }
+            let mut idx = 0;
+            while idx < result.calls.len() {
+                if self.abort.is_aborted() {
+                    break;
+                }
+                if is_read_only(&result.calls[idx].name) {
+                    let mut end = idx;
+                    while end < result.calls.len() && is_read_only(&result.calls[end].name) {
+                        end += 1;
+                    }
+                    let batch = &result.calls[idx..end];
+                    let outputs = futures_util::future::join_all(batch.iter().map(|c| {
+                        run_tool_with_hooks(&self.tools, &ctx, &self.hooks, &self.cwd, c)
+                    }))
+                    .await;
+                    for (call, output) in batch.iter().zip(outputs) {
+                        self.emit(StreamEvent::ToolResult {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            output: output.clone(),
+                        });
+                        self.messages.push(Message::tool(call.id.clone(), output));
+                    }
+                    idx = end;
+                } else {
+                    let call = &result.calls[idx];
+                    let output =
+                        run_tool_with_hooks(&self.tools, &ctx, &self.hooks, &self.cwd, call).await;
+                    self.emit(StreamEvent::ToolResult {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        output: output.clone(),
+                    });
+                    self.messages.push(Message::tool(call.id.clone(), output));
+                    idx += 1;
+                }
             }
         }
 
@@ -343,6 +430,11 @@ impl AgentLoop {
         let mut text = String::new();
         let mut deltas: Vec<ToolCallDelta> = Vec::new();
         let mut usage = Usage::default();
+        // Accumulated silence since the last stream event. Polls are short so
+        // aborts land within ~1s even on a fully dead stream; only sustained
+        // silence up to the idle timeout counts as a stall.
+        let mut silent = Duration::ZERO;
+        let poll = self.stream_idle_timeout.min(Duration::from_secs(1));
 
         loop {
             if self.abort.is_aborted() {
@@ -353,7 +445,34 @@ impl AgentLoop {
                     aborted: true,
                 });
             }
-            match stream.next().await {
+            // Idle watchdog: each event resets the clock. A stream that goes
+            // silent (blackholed route, dead proxy, hung server) fails as a
+            // retryable error instead of wedging the task forever.
+            let next = match tokio::time::timeout(poll, stream.next()).await {
+                Ok(next) => {
+                    silent = Duration::ZERO;
+                    next
+                }
+                Err(_) => {
+                    silent += poll;
+                    if self.abort.is_aborted() {
+                        return Ok(TurnResult {
+                            text,
+                            calls: accumulate_tool_calls(&deltas),
+                            usage,
+                            aborted: true,
+                        });
+                    }
+                    if silent >= self.stream_idle_timeout {
+                        return Err(DoreanError::Stream(format!(
+                            "stream stalled: no data for {}s (check network / proxy)",
+                            self.stream_idle_timeout.as_secs()
+                        )));
+                    }
+                    continue;
+                }
+            };
+            match next {
                 Some(Ok(CompletionEvent::TextDelta(delta))) => {
                     if self.print_stream {
                         print!("{delta}");
@@ -392,5 +511,73 @@ fn tool_brief(call: &ToolCall) -> String {
         format!("{} {}", call.name, &args[..80])
     } else {
         format!("{} {args}", call.name)
+    }
+}
+
+/// Read-only tools are safe to run concurrently: no side effects, no ordering
+/// constraints. Everything else (write/edit/bash/todo/…) runs serially.
+fn is_read_only(name: &str) -> bool {
+    matches!(name, "read" | "glob" | "grep" | "list" | "bash_poll")
+}
+
+/// Run one tool with Pre/Post hooks. A Pre-hook exit-2 denial returns denial
+/// text without executing the tool; Post-hook stdout is appended as context.
+async fn run_tool_with_hooks(
+    registry: &ToolRegistry,
+    ctx: &ToolContext,
+    hooks: &[crate::agent::hooks::Hook],
+    cwd: &std::path::Path,
+    call: &ToolCall,
+) -> String {
+    use crate::agent::hooks::{HookEvent, run_hooks};
+    if !hooks.is_empty() {
+        match run_hooks(
+            hooks,
+            HookEvent::PreToolUse,
+            &call.name,
+            &call.arguments,
+            cwd,
+        ) {
+            crate::agent::hooks::HookOutcome::Deny { reason } => {
+                return format!("Hook denied tool `{}`: {reason}", call.name);
+            }
+            crate::agent::hooks::HookOutcome::Allow { extra_context } => {
+                if !extra_context.is_empty() {
+                    let out = registry.run(ctx, call).await;
+                    let post = run_hooks(
+                        hooks,
+                        HookEvent::PostToolUse,
+                        &call.name,
+                        &call.arguments,
+                        cwd,
+                    );
+                    let suffix = match post {
+                        crate::agent::hooks::HookOutcome::Allow { extra_context: p }
+                            if !p.is_empty() =>
+                        {
+                            format!("\n[hook context]\n{p}")
+                        }
+                        _ => String::new(),
+                    };
+                    return format!("{out}\n[pre-hook context]\n{extra_context}{suffix}");
+                }
+            }
+        }
+    }
+    let out = registry.run(ctx, call).await;
+    if hooks.is_empty() {
+        return out;
+    }
+    match run_hooks(
+        hooks,
+        HookEvent::PostToolUse,
+        &call.name,
+        &call.arguments,
+        cwd,
+    ) {
+        crate::agent::hooks::HookOutcome::Allow { extra_context } if !extra_context.is_empty() => {
+            format!("{out}\n[hook context]\n{extra_context}")
+        }
+        _ => out,
     }
 }

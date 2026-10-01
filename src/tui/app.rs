@@ -42,6 +42,7 @@ enum AgentStatus {
 #[derive(Debug, Clone, Copy)]
 enum SelectKind {
     Model,
+    Provider,
     Stack,
     PermMode,
     Theme,
@@ -52,8 +53,10 @@ enum SelectKind {
 enum Overlay {
     /// A transient "fetching…" state (e.g. before the model list arrives).
     Loading(String),
-    /// Filterable list of free models.
+    /// Filterable list of models (aggregated across providers).
     Model(SelectList),
+    /// Provider picker for `/key` (and anywhere a provider is chosen).
+    Provider(SelectList),
     /// Filterable list of stack presets for `/make`.
     Stack(SelectList),
     /// Tool-approval policy picker (`/permission`).
@@ -69,8 +72,9 @@ enum Overlay {
         prompt: String,
         reply: std::sync::mpsc::Sender<bool>,
     },
-    /// Enter (or replace) the OpenRouter API key; the buffer is masked.
-    ApiKey { input: String },
+    /// Enter (or replace) the API key for the scoped provider; the buffer is
+    /// masked. Picked from the provider picker (`/key`), never assumed.
+    ApiKey { provider: Provider, input: String },
     /// The `.dorean/SPEC.md` plan viewer.
     Spec,
     /// Keybinding reference.
@@ -137,6 +141,10 @@ pub struct App {
     /// Saved sessions backing the `/sessions` selector (agent, record),
     /// newest first, matching the selector's item order.
     sessions: Vec<(String, SessionRecord)>,
+    /// Id of the latest model-list fetch. Responses echo it; superseded
+    /// arrivals are ignored so a late fetch can't populate the wrong picker
+    /// (or kill a newer spinner).
+    model_fetch_id: u64,
     /// Current terminal size, updated on `Event::Resize` (and used by tests
     /// to render frames deterministically).
     term_size: (u16, u16),
@@ -183,6 +191,7 @@ impl App {
             agent_models: None,
             pending_model_agent: None,
             sessions: Vec::new(),
+            model_fetch_id: 0,
             term_size: Terminal::size(),
             terminal: None,
             suspend: Arc::new(AtomicBool::new(false)),
@@ -291,9 +300,12 @@ impl App {
         match event {
             Event::Resize(width, height) => self.term_size = (width, height),
             Event::Paste(text) => match self.overlay.take() {
-                Some(Overlay::ApiKey { mut input }) => {
+                Some(Overlay::ApiKey {
+                    provider,
+                    mut input,
+                }) => {
                     input.push_str(&text);
-                    self.overlay = Some(Overlay::ApiKey { input });
+                    self.overlay = Some(Overlay::ApiKey { provider, input });
                 }
                 Some(other) => self.overlay = Some(other),
                 None => {
@@ -360,6 +372,9 @@ impl App {
                 }
             }
             Some(Overlay::Model(list)) => self.handle_select_key(key, list, SelectKind::Model),
+            Some(Overlay::Provider(list)) => {
+                self.handle_select_key(key, list, SelectKind::Provider)
+            }
             Some(Overlay::Stack(list)) => self.handle_select_key(key, list, SelectKind::Stack),
             Some(Overlay::PermMode(list)) => {
                 self.handle_select_key(key, list, SelectKind::PermMode)
@@ -367,7 +382,9 @@ impl App {
             Some(Overlay::Theme(list)) => self.handle_select_key(key, list, SelectKind::Theme),
             Some(Overlay::Sessions(list)) => self.handle_select_key(key, list, SelectKind::Session),
             Some(Overlay::AgentModels { selected }) => self.handle_agent_models_key(key, selected),
-            Some(Overlay::ApiKey { input }) => self.handle_api_key_key(key, input),
+            Some(Overlay::ApiKey { provider, input }) => {
+                self.handle_api_key_key(key, provider, input)
+            }
             // Handled above: a pending permission prompt blocks all input.
             Some(Overlay::Permission { .. }) => unreachable!(),
             None => self.handle_input_key(key),
@@ -394,27 +411,34 @@ impl App {
         match chosen {
             Some(value) => match kind {
                 SelectKind::Model => {
+                    let (provider, id) = Self::parse_model_row(&value, self.config.provider);
                     if let Some(index) = self.pending_model_agent.take() {
                         let agent_name = if let Some(roster) = self.agent_models.as_mut()
                             && index < roster.len()
                         {
-                            roster[index].model = Some(value.clone());
+                            roster[index].model = Some(id.clone());
+                            // Remember a cross-provider pick so the sub-agent
+                            // runs against the right backend.
+                            roster[index].provider =
+                                (provider != self.config.provider).then_some(provider);
                             roster[index].name.clone()
                         } else {
                             String::new()
                         };
                         if agent_name.is_empty() {
-                            self.model = value.clone();
-                            let _ = self.cmd_tx.send(SessionCmd::SetModel(value));
+                            self.apply_model_choice(provider, id);
                         } else {
                             self.overlay = Some(Overlay::AgentModels { selected: index });
-                            self.toast(format!("@{agent_name} brain → {value}"), ToastKind::Info);
+                            self.toast(
+                                format!("@{agent_name} brain → {provider}/{id}"),
+                                ToastKind::Info,
+                            );
                         }
                     } else {
-                        self.model = value.clone();
-                        let _ = self.cmd_tx.send(SessionCmd::SetModel(value));
+                        self.apply_model_choice(provider, id);
                     }
                 }
+                SelectKind::Provider => self.choose_provider(&value),
                 SelectKind::Stack => self.start_orchestration(value),
                 SelectKind::PermMode => self.apply_permission(&value),
                 SelectKind::Theme => self.apply_theme(&value),
@@ -432,6 +456,7 @@ impl App {
             None => {
                 self.overlay = Some(match kind {
                     SelectKind::Model => Overlay::Model(list),
+                    SelectKind::Provider => Overlay::Provider(list),
                     SelectKind::Stack => Overlay::Stack(list),
                     SelectKind::PermMode => Overlay::PermMode(list),
                     SelectKind::Theme => Overlay::Theme(list),
@@ -454,8 +479,7 @@ impl App {
                     self.begin_orchestration();
                 } else {
                     self.pending_model_agent = Some(selected);
-                    self.overlay = Some(Overlay::Loading("fetching free models…".to_string()));
-                    let _ = self.cmd_tx.send(SessionCmd::FetchModels);
+                    self.request_models();
                 }
                 return;
             }
@@ -468,12 +492,12 @@ impl App {
         self.overlay = Some(Overlay::AgentModels { selected });
     }
 
-    fn handle_api_key_key(&mut self, key: KeyEvent, mut input: String) {
+    fn handle_api_key_key(&mut self, key: KeyEvent, provider: Provider, mut input: String) {
         let close = matches!(key.code, KeyCode::Esc);
         match key.code {
             KeyCode::Esc => {}
             KeyCode::Enter => {
-                self.submit_api_key(input.trim().to_string());
+                self.submit_api_key(provider, input.trim().to_string());
                 return;
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => input.clear(),
@@ -484,35 +508,144 @@ impl App {
             _ => {}
         }
         if !close {
-            self.overlay = Some(Overlay::ApiKey { input });
+            self.overlay = Some(Overlay::ApiKey { provider, input });
         }
     }
 
-    /// Persist the entered key, rebuild the background agent, and jump straight
-    /// into the model selector so the user can confirm the key works.
-    fn submit_api_key(&mut self, key: String) {
+    /// Persist the entered key for the scoped provider, switch to it, and jump
+    /// straight into the aggregated model selector so the user can confirm the
+    /// key works.
+    fn submit_api_key(&mut self, provider: Provider, key: String) {
         if key.is_empty() {
             return;
         }
-        match self.config.provider {
+        match provider {
             crate::config::Provider::OpenRouter => {
-                self.config.openrouter_api_key = Some(key);
+                self.config.openrouter_api_key = Some(key.clone());
             }
             crate::config::Provider::Nvidia => {
-                self.config.nvidia_api_key = Some(key);
+                self.config.nvidia_api_key = Some(key.clone());
             }
+            crate::config::Provider::DeepSeek => {
+                self.config.deepseek_api_key = Some(key.clone());
+            }
+            crate::config::Provider::Generic => {
+                self.config.generic_api_key = Some(key.clone());
+            }
+            crate::config::Provider::Local => {}
         }
         if let Err(e) = self.config.save() {
             self.toast(format!("failed to save config: {e}"), ToastKind::Error);
         }
-        let key = match self.config.provider {
-            crate::config::Provider::OpenRouter => self.config.openrouter_api_key.clone(),
-            crate::config::Provider::Nvidia => self.config.nvidia_api_key.clone(),
+        self.switch_provider(provider);
+        let _ = self.cmd_tx.send(SessionCmd::SetApiKey { provider, key });
+        self.request_models();
+    }
+
+    /// Switch the active provider immediately: persist config, tell the
+    /// background agent to rebuild, and point the header at the new default
+    /// model until the user picks one.
+    fn switch_provider(&mut self, provider: Provider) {
+        self.config.provider = provider;
+        if let Err(e) = self.config.save() {
+            self.toast(format!("failed to save config: {e}"), ToastKind::Error);
         }
-        .unwrap_or_default();
-        let _ = self.cmd_tx.send(SessionCmd::SetApiKey(key));
-        self.overlay = Some(Overlay::Loading("fetching free models…".to_string()));
-        let _ = self.cmd_tx.send(SessionCmd::FetchModels);
+        self.model = self
+            .config
+            .model
+            .clone()
+            .unwrap_or_else(|| default_model(provider).to_string());
+        let _ = self.cmd_tx.send(SessionCmd::SetProvider(provider));
+    }
+
+    /// Apply a model choice from the aggregated picker: switch providers when
+    /// the row belongs elsewhere, then set the model.
+    fn apply_model_choice(&mut self, provider: Provider, id: String) {
+        if provider != self.config.provider {
+            self.switch_provider(provider);
+        }
+        self.model = id.clone();
+        let _ = self.cmd_tx.send(SessionCmd::SetModel(id));
+    }
+
+    /// Rows for the provider picker: id + key status. The id is the first
+    /// whitespace-delimited token so Enter can parse it back.
+    fn provider_rows(&self) -> Vec<String> {
+        [
+            Provider::OpenRouter,
+            Provider::Nvidia,
+            Provider::DeepSeek,
+            Provider::Local,
+            Provider::Generic,
+        ]
+        .iter()
+        .map(|p| {
+            let status = match p {
+                Provider::OpenRouter if self.config.openrouter_api_key.is_some() => "● key set",
+                Provider::Nvidia if self.config.nvidia_api_key.is_some() => "● key set",
+                Provider::DeepSeek if self.config.deepseek_api_key.is_some() => "● key set",
+                Provider::Generic if self.config.generic_api_key.is_some() => "● key set",
+                Provider::Local => "no key needed",
+                _ => "○ no key",
+            };
+            let active = if *p == self.config.provider {
+                " · active"
+            } else {
+                ""
+            };
+            format!("{p} — {status}{active}")
+        })
+        .collect()
+    }
+
+    /// Enter on a provider-picker row: switch immediately, then open that
+    /// provider's key entry (local needs none — go straight to models).
+    fn choose_provider(&mut self, row: &str) {
+        let id = row.split_whitespace().next().unwrap_or_default();
+        let Ok(provider) = id.parse::<Provider>() else {
+            self.toast(format!("unknown provider `{id}`"), ToastKind::Error);
+            return;
+        };
+        self.switch_provider(provider);
+        self.open_api_key_for(provider);
+    }
+
+    /// Open the masked key entry for a provider (local skips to fetch).
+    fn open_api_key_for(&mut self, provider: Provider) {
+        if provider == Provider::Local {
+            self.toast("local needs no key — fetching models…", ToastKind::Info);
+            self.request_models();
+            return;
+        }
+        self.overlay = Some(Overlay::ApiKey {
+            provider,
+            input: String::new(),
+        });
+    }
+
+    /// Open the Loading overlay and ask the background task for a fresh model
+    /// list. Each request gets a new id; arrivals echo it so superseded
+    /// fetches are ignored instead of populating the wrong picker.
+    fn request_models(&mut self) {
+        self.model_fetch_id += 1;
+        let id = self.model_fetch_id;
+        self.overlay = Some(Overlay::Loading("fetching models…".to_string()));
+        let _ = self.cmd_tx.send(SessionCmd::FetchModels { id });
+    }
+
+    /// Split an aggregated model-picker row back into (provider, id).
+    /// Rows are `"provider  id[ · free]"` (two-space separator, optional free
+    /// badge); bare ids without a separator belong to the active provider
+    /// (older fixtures, ad-hoc rows).
+    fn parse_model_row(row: &str, active: Provider) -> (Provider, String) {
+        if let Some((provider, id)) = row.split_once("  ")
+            && let Ok(provider) = provider.parse::<Provider>()
+            && !id.is_empty()
+        {
+            let id = id.strip_suffix(" · free").unwrap_or(id);
+            return (provider, id.to_string());
+        }
+        (active, row.to_string())
     }
 
     fn handle_input_key(&mut self, key: KeyEvent) {
@@ -634,14 +767,23 @@ impl App {
         let arg = parts.next().unwrap_or("").trim();
         match name {
             "help" => self.overlay = Some(Overlay::Help),
-            "model" => {
-                self.overlay = Some(Overlay::Loading("fetching free models…".to_string()));
-                let _ = self.cmd_tx.send(SessionCmd::FetchModels);
-            }
+            "model" => self.request_models(),
             "key" => {
-                self.overlay = Some(Overlay::ApiKey {
-                    input: String::new(),
-                })
+                if arg.is_empty() {
+                    self.overlay = Some(Overlay::Provider(SelectList::new(
+                        "provider — pick one, then enter its key",
+                        self.provider_rows(),
+                    )));
+                } else if let Ok(provider) = arg.parse::<Provider>() {
+                    // `/key nvidia`: switch immediately, jump to key entry.
+                    self.switch_provider(provider);
+                    self.open_api_key_for(provider);
+                } else {
+                    self.toast(
+                        format!("unknown provider `{arg}` — try /key with no args"),
+                        ToastKind::Error,
+                    );
+                }
             }
             "stack" => {
                 let items = STACKS.iter().map(|s| s.to_string()).collect();
@@ -1076,13 +1218,32 @@ impl App {
                 }
                 self.toast("orchestration finished", ToastKind::Success);
             }
-            TuiEvent::ModelList(models) => {
-                let items: Vec<String> = models.into_iter().map(|m| m.id).collect();
+            TuiEvent::ModelList { id, models } => {
+                if id != self.model_fetch_id {
+                    return; // superseded fetch — a newer spinner owns the overlay
+                }
+                if models.is_empty() {
+                    if matches!(self.overlay, Some(Overlay::Loading(_))) {
+                        self.overlay = None;
+                    }
+                    self.toast("no models returned by any provider", ToastKind::Error);
+                    return;
+                }
+                let items: Vec<String> = models
+                    .into_iter()
+                    .map(|(provider, m)| {
+                        let free = if m.is_free { " · free" } else { "" };
+                        format!("{provider}  {}{free}", m.id)
+                    })
+                    .collect();
                 if matches!(self.overlay, Some(Overlay::Loading(_))) {
                     self.overlay = Some(Overlay::Model(SelectList::new("model", items)));
                 }
             }
-            TuiEvent::ModelListFailed(text) => {
+            TuiEvent::ModelListFailed { id, message } => {
+                if id != self.model_fetch_id {
+                    return; // stale failure must not kill a newer spinner
+                }
                 if matches!(self.overlay, Some(Overlay::Loading(_))) {
                     if self.pending_model_agent.is_some() && self.agent_models.is_some() {
                         let selected = self.pending_model_agent.take().unwrap_or(0);
@@ -1091,7 +1252,7 @@ impl App {
                         self.overlay = None;
                     }
                 }
-                self.toast(text, ToastKind::Error);
+                self.toast(message, ToastKind::Error);
             }
             TuiEvent::Notice(text) => self.toast(text, ToastKind::Info),
             TuiEvent::Error(text) => {
@@ -1465,6 +1626,9 @@ impl App {
         let key_missing = match self.config.provider {
             Provider::OpenRouter => self.config.openrouter_api_key.is_none(),
             Provider::Nvidia => self.config.nvidia_api_key.is_none(),
+            Provider::DeepSeek => self.config.deepseek_api_key.is_none(),
+            Provider::Generic => false,
+            Provider::Local => false,
         };
         let hint = if key_missing {
             " ⚠ no key (/key)"
@@ -1711,6 +1875,10 @@ impl App {
                 Self::draw_list(screen, &theme, &mut list, width, height);
                 self.overlay = Some(Overlay::Model(list));
             }
+            Overlay::Provider(mut list) => {
+                Self::draw_list(screen, &theme, &mut list, width, height);
+                self.overlay = Some(Overlay::Provider(list));
+            }
             Overlay::Stack(mut list) => {
                 Self::draw_list(screen, &theme, &mut list, width, height);
                 self.overlay = Some(Overlay::Stack(list));
@@ -1731,9 +1899,9 @@ impl App {
                 self.draw_agent_models(screen, &theme, width, height, selected);
                 self.overlay = Some(Overlay::AgentModels { selected });
             }
-            Overlay::ApiKey { input } => {
-                Self::draw_api_key(screen, &theme, width, height, &input, self.config.provider);
-                self.overlay = Some(Overlay::ApiKey { input });
+            Overlay::ApiKey { provider, input } => {
+                Self::draw_api_key(screen, &theme, width, height, &input, provider);
+                self.overlay = Some(Overlay::ApiKey { provider, input });
             }
             Overlay::Permission { prompt, reply } => {
                 Self::draw_permission(screen, &theme, width, height, &prompt);
@@ -1842,6 +2010,9 @@ impl App {
         let label = match provider {
             Provider::OpenRouter => " openrouter api key",
             Provider::Nvidia => " nvidia api key",
+            Provider::DeepSeek => " deepseek api key",
+            Provider::Generic => " generic api key",
+            Provider::Local => " local (no key needed)",
         };
         screen.put_str(bx + 2, by, label, theme.accent, theme.bg, Attrs::bold());
         screen.put_str(
@@ -1937,8 +2108,8 @@ impl App {
             ("↑/↓", "history or cursor · select in menus"),
             ("pgup/pgdn", "scroll the chat"),
             ("tab", "complete @agent mention"),
-            ("/model", "switch model"),
-            ("/key", "set api key"),
+            ("/model", "switch model (all providers)"),
+            ("/key", "pick provider + set api key"),
             ("/permission", "allow / ask / deny tool approval"),
             ("/theme", "auto · light · dark · JSON themes"),
             ("/sessions", "resume a saved session"),
@@ -2347,6 +2518,7 @@ mod app_tests {
                 allowed_tools: Some(vec!["bash".to_string()]),
                 owned_paths: vec![PathBuf::from("src")],
                 model: None,
+                provider: None,
             },
             AgentManifest {
                 name: "frontend".to_string(),
@@ -2355,6 +2527,7 @@ mod app_tests {
                 allowed_tools: Some(vec!["bash".to_string()]),
                 owned_paths: vec![PathBuf::from("ui")],
                 model: None,
+                provider: None,
             },
         ];
         app.agent_status
@@ -2469,13 +2642,37 @@ mod app_tests {
     #[test]
     fn model_list_failed_dismisses_loading_overlay() {
         let mut app = test_app();
-        app.overlay = Some(Overlay::Loading("fetching free models…".to_string()));
-        app.handle_tui_event(TuiEvent::ModelListFailed("no API key".to_string()));
+        app.overlay = Some(Overlay::Loading("fetching models…".to_string()));
+        app.handle_tui_event(TuiEvent::ModelListFailed {
+            id: app.model_fetch_id,
+            message: "no API key".to_string(),
+        });
         assert!(app.overlay.is_none());
         assert_eq!(app.toasts.len(), 1);
         assert!(
             matches!(app.toasts.front(), Some((text, ToastKind::Error, _)) if text == "no API key")
         );
+    }
+
+    #[test]
+    fn stale_model_events_are_ignored() {
+        let mut app = test_app();
+        // A newer fetch is in flight (Loading); a late failure from the
+        // previous fetch must not kill the spinner nor toast.
+        app.request_models();
+        let stale = app.model_fetch_id - 1;
+        app.handle_tui_event(TuiEvent::ModelListFailed {
+            id: stale,
+            message: "old news".to_string(),
+        });
+        assert!(matches!(app.overlay, Some(Overlay::Loading(_))));
+        assert!(app.toasts.is_empty());
+        // Same for a stale success: no picker hijack.
+        app.handle_tui_event(TuiEvent::ModelList {
+            id: stale,
+            models: vec![],
+        });
+        assert!(matches!(app.overlay, Some(Overlay::Loading(_))));
     }
 
     #[test]
@@ -2487,33 +2684,180 @@ mod app_tests {
     }
 
     #[test]
-    fn key_command_opens_api_key_overlay_and_edits() {
+    fn key_command_opens_provider_picker_then_api_key() {
         let mut app = test_app();
         app.run_command("key");
-        assert!(matches!(app.overlay, Some(Overlay::ApiKey { .. })));
+        assert!(matches!(app.overlay, Some(Overlay::Provider(_))));
+        // Enter on the first row (openrouter) switches and opens key entry.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::ApiKey { provider, .. }) if provider == Provider::OpenRouter
+        ));
+        assert_eq!(app.config.provider, Provider::OpenRouter);
+        // Typing and backspace edit the masked buffer.
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
         assert!(matches!(
             app.overlay,
-            Some(Overlay::ApiKey { ref input }) if input == "sk"
+            Some(Overlay::ApiKey { ref input, .. }) if input == "sk"
         ));
         app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert!(matches!(
             app.overlay,
-            Some(Overlay::ApiKey { ref input }) if input == "s"
+            Some(Overlay::ApiKey { ref input, .. }) if input == "s"
         ));
+    }
+
+    #[test]
+    fn key_command_with_provider_arg_jumps_to_key_entry() {
+        let mut app = test_app();
+        app.run_command("key nvidia");
+        assert_eq!(app.config.provider, Provider::Nvidia);
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::ApiKey { provider, .. }) if provider == Provider::Nvidia
+        ));
+    }
+
+    #[test]
+    fn key_command_with_bogus_provider_toasts() {
+        let mut app = test_app();
+        app.run_command("key bogus");
+        assert!(app.overlay.is_none());
+        assert_eq!(app.toasts.len(), 1);
+    }
+
+    #[test]
+    fn key_picker_local_skips_to_fetch() {
+        let mut app = test_app();
+        app.run_command("key");
+        // Filter to the local row, then Enter.
+        if let Some(Overlay::Provider(mut list)) = app.overlay.take() {
+            list.set_filter("local".to_string());
+            app.overlay = Some(Overlay::Provider(list));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.config.provider, Provider::Local);
+        assert!(matches!(app.overlay, Some(Overlay::Loading(_))));
+    }
+
+    #[test]
+    fn parse_model_row_handles_tagged_bare_and_badged() {
+        assert_eq!(
+            App::parse_model_row(
+                "nvidia  nvidia/nemotron-3-ultra-550b-a55b",
+                Provider::OpenRouter
+            ),
+            (
+                Provider::Nvidia,
+                "nvidia/nemotron-3-ultra-550b-a55b".to_string()
+            )
+        );
+        // Free badge is display-only and stripped on parse.
+        assert_eq!(
+            App::parse_model_row(
+                "openrouter  meta-llama/llama-3.3-70b-instruct:free · free",
+                Provider::Nvidia
+            ),
+            (
+                Provider::OpenRouter,
+                "meta-llama/llama-3.3-70b-instruct:free".to_string()
+            )
+        );
+        // Bare ids fall back to the active provider (back-compat).
+        assert_eq!(
+            App::parse_model_row("m1", Provider::DeepSeek),
+            (Provider::DeepSeek, "m1".to_string())
+        );
+    }
+
+    #[test]
+    fn provider_rows_cover_all_providers() {
+        let app = test_app();
+        let rows = app.provider_rows();
+        assert_eq!(rows.len(), 5);
+        for id in ["openrouter", "nvidia", "deepseek", "local", "generic"] {
+            assert!(rows.iter().any(|r| r.starts_with(id)), "missing {id}");
+        }
+        assert!(rows.iter().any(|r| r.contains("active")));
+    }
+
+    #[test]
+    fn model_choice_on_other_provider_switches_first() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_events_tx, events_rx) = mpsc::unbounded_channel();
+        let (_approve_tx, approve_rx) = mpsc::unbounded_channel();
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp"),
+            Theme::dark(),
+            cmd_tx,
+            events_rx,
+            approve_rx,
+            AbortHandle::new(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(app.config.provider, Provider::OpenRouter);
+        app.apply_model_choice(Provider::Nvidia, "nvidia/nemotron-3-x".to_string());
+        assert_eq!(app.config.provider, Provider::Nvidia);
+        assert_eq!(app.model, "nvidia/nemotron-3-x");
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCmd::SetProvider(Provider::Nvidia))
+        ));
+        assert!(matches!(cmd_rx.try_recv(), Ok(SessionCmd::SetModel(_))));
+    }
+
+    #[test]
+    fn tagged_model_list_opens_picker_and_chooses_with_provider() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::Loading("fetching models…".to_string()));
+        app.handle_tui_event(TuiEvent::ModelList {
+            id: app.model_fetch_id,
+            models: vec![(
+                Provider::DeepSeek,
+                crate::providers::client::ModelInfo {
+                    id: "deepseek-chat".to_string(),
+                    name: String::new(),
+                    description: String::new(),
+                    context_length: None,
+                    is_free: false,
+                    prompt_price: 0.0,
+                    completion_price: 0.0,
+                },
+            )],
+        });
+        assert!(matches!(app.overlay, Some(Overlay::Model(_))));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.config.provider, Provider::DeepSeek);
+        assert_eq!(app.model, "deepseek-chat");
+    }
+
+    #[test]
+    fn empty_model_list_dismisses_with_error() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::Loading("fetching models…".to_string()));
+        app.handle_tui_event(TuiEvent::ModelList {
+            id: app.model_fetch_id,
+            models: vec![],
+        });
+        assert!(app.overlay.is_none());
+        assert!(matches!(app.toasts.front(), Some((_, ToastKind::Error, _))));
     }
 
     #[test]
     fn paste_into_api_key_overlay() {
         let mut app = test_app();
         app.overlay = Some(Overlay::ApiKey {
+            provider: Provider::OpenRouter,
             input: String::new(),
         });
         app.handle_term_event(Event::Paste("sk-live-key".to_string()));
         assert!(matches!(
             app.overlay,
-            Some(Overlay::ApiKey { ref input }) if input == "sk-live-key"
+            Some(Overlay::ApiKey { ref input, .. }) if input == "sk-live-key"
         ));
     }
 
@@ -2521,6 +2865,7 @@ mod app_tests {
     fn esc_closes_api_key_overlay() {
         let mut app = test_app();
         app.overlay = Some(Overlay::ApiKey {
+            provider: Provider::Nvidia,
             input: "abc".to_string(),
         });
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -2883,7 +3228,10 @@ mod app_tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.pending_model_agent, Some(0));
         assert!(matches!(app.overlay, Some(Overlay::Loading(_))));
-        assert!(matches!(cmd_rx.try_recv(), Ok(SessionCmd::FetchModels)));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCmd::FetchModels { .. })
+        ));
 
         // The model list arrives; choosing one assigns it to the agent.
         app.overlay = Some(Overlay::Model(SelectList::new(

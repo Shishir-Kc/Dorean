@@ -58,6 +58,62 @@ impl fmt::Display for PermissionMode {
     }
 }
 
+/// Codex-style sandbox presets presented in `/permissions`. They map onto
+/// [`PermissionMode`] plus a writable-roots scope:
+/// - Suggest: read-only by default, approve every edit/command.
+/// - AutoEdit: edits auto-approved, commands still ask.
+/// - FullAuto: everything inside the writable roots runs sandboxed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxMode {
+    Suggest,
+    AutoEdit,
+    FullAuto,
+}
+
+impl SandboxMode {
+    pub fn permission_mode(self) -> PermissionMode {
+        match self {
+            SandboxMode::Suggest => PermissionMode::Ask,
+            SandboxMode::AutoEdit => PermissionMode::Allow,
+            SandboxMode::FullAuto => PermissionMode::Allow,
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            SandboxMode::Suggest => "suggest: approve every edit and command",
+            SandboxMode::AutoEdit => "auto-edit: edits auto-run, commands ask",
+            SandboxMode::FullAuto => "full-auto: sandboxed to writable roots",
+        }
+    }
+}
+
+impl std::str::FromStr for SandboxMode {
+    type Err = DoreanError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "suggest" => Ok(SandboxMode::Suggest),
+            "auto-edit" | "autoedit" => Ok(SandboxMode::AutoEdit),
+            "full-auto" | "fullauto" => Ok(SandboxMode::FullAuto),
+            other => Err(DoreanError::Config(format!(
+                "unknown sandbox mode `{other}` (expected suggest|auto-edit|full-auto)"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for SandboxMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SandboxMode::Suggest => "suggest",
+            SandboxMode::AutoEdit => "auto-edit",
+            SandboxMode::FullAuto => "full-auto",
+        })
+    }
+}
+
 /// The approval callback: given a human-readable prompt, returns whether the
 /// user approved the operation.
 pub type AskFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;

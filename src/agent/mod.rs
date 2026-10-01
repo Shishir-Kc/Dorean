@@ -2,9 +2,14 @@
 //! sub-agent orchestration layer.
 
 pub mod agent_loop;
+pub mod checkpoints;
+pub mod compact;
 pub mod context;
 pub mod events;
+pub mod hooks;
 pub mod manifest;
+pub mod mcp;
+pub mod memory;
 pub mod orchestrator;
 pub mod prompts;
 pub mod router;
@@ -12,7 +17,9 @@ pub mod spec;
 pub mod stack;
 pub mod sub_agent;
 pub mod todos;
+pub mod token_meter;
 pub mod tools;
+pub mod worktree;
 
 use std::path::PathBuf;
 

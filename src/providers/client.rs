@@ -200,6 +200,9 @@ impl ChatRequest {
             "model": self.model,
             "messages": self.messages,
             "stream": true,
+            // Ask providers to include final usage (tokens + cache hits) in the
+            // stream. Ignored by servers that don't support it.
+            "stream_options": { "include_usage": true },
         });
         if let Some(max_tokens) = self.max_tokens {
             body["max_tokens"] = serde_json::json!(max_tokens);

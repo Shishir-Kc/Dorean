@@ -15,6 +15,9 @@ pub enum Provider {
     #[default]
     OpenRouter,
     Nvidia,
+    DeepSeek,
+    Local,
+    Generic,
 }
 
 impl FromStr for Provider {
@@ -24,8 +27,11 @@ impl FromStr for Provider {
         match s.trim().to_ascii_lowercase().as_str() {
             "openrouter" => Ok(Provider::OpenRouter),
             "nvidia" => Ok(Provider::Nvidia),
+            "deepseek" => Ok(Provider::DeepSeek),
+            "local" | "ollama" => Ok(Provider::Local),
+            "generic" | "custom" | "openai-compatible" => Ok(Provider::Generic),
             other => Err(DoreanError::Config(format!(
-                "unknown provider `{other}` (expected `openrouter` or `nvidia`)"
+                "unknown provider `{other}` (expected `openrouter`, `nvidia`, `deepseek`, `local`, or `generic`)"
             ))),
         }
     }
@@ -36,6 +42,9 @@ impl fmt::Display for Provider {
         f.write_str(match self {
             Provider::OpenRouter => "openrouter",
             Provider::Nvidia => "nvidia",
+            Provider::DeepSeek => "deepseek",
+            Provider::Local => "local",
+            Provider::Generic => "generic",
         })
     }
 }
@@ -50,6 +59,8 @@ pub struct Config {
     pub base_url: Option<String>,
     pub openrouter_api_key: Option<String>,
     pub nvidia_api_key: Option<String>,
+    pub deepseek_api_key: Option<String>,
+    pub generic_api_key: Option<String>,
     pub telemetry: bool,
     pub theme: Option<String>,
     pub max_tokens: Option<u32>,
@@ -66,6 +77,14 @@ pub struct Config {
     /// Per-sub-agent model overrides (agent name → model id). Applied when a
     /// sub-agent has no explicit model from the `/make` model picker.
     pub agent_models: HashMap<String, String>,
+    /// Cheap executor model for sub-agents / routine turns (dual-model runs).
+    pub executor_model: Option<String>,
+    /// Smart planner model for orchestration / compaction summaries.
+    pub planner_model: Option<String>,
+    /// Estimated-token threshold that triggers auto-compaction (0 disables).
+    pub compact_threshold: u64,
+    /// `off` disables auto-compaction (manual `/compact` only).
+    pub auto_compact: bool,
 }
 
 impl Default for Config {
@@ -76,6 +95,8 @@ impl Default for Config {
             base_url: None,
             openrouter_api_key: None,
             nvidia_api_key: None,
+            deepseek_api_key: None,
+            generic_api_key: None,
             telemetry: true,
             theme: None,
             max_tokens: None,
@@ -85,6 +106,10 @@ impl Default for Config {
             safe_dirs: Vec::new(),
             sub_agent_rounds: 10,
             agent_models: HashMap::new(),
+            executor_model: None,
+            planner_model: None,
+            compact_threshold: 100_000,
+            auto_compact: true,
         }
     }
 }
@@ -159,6 +184,27 @@ impl Config {
         }
         if let Ok(value) = std::env::var("DOREAN_NVIDIA_API_KEY") {
             self.nvidia_api_key = Some(value);
+        }
+        if let Ok(value) = std::env::var("DOREAN_DEEPSEEK_API_KEY") {
+            self.deepseek_api_key = Some(value);
+        }
+        if let Ok(value) = std::env::var("DOREAN_GENERIC_API_KEY") {
+            self.generic_api_key = Some(value);
+        }
+        if let Ok(value) = std::env::var("DOREAN_EXECUTOR_MODEL") {
+            self.executor_model = Some(value);
+        }
+        if let Ok(value) = std::env::var("DOREAN_PLANNER_MODEL") {
+            self.planner_model = Some(value);
+        }
+        if let Ok(value) = std::env::var("DOREAN_COMPACT_THRESHOLD") {
+            self.compact_threshold = value.parse().unwrap_or(self.compact_threshold);
+        }
+        if let Ok(value) = std::env::var("DOREAN_AUTO_COMPACT") {
+            self.auto_compact = !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            );
         }
         if let Ok(value) = std::env::var("DOREAN_TELEMETRY") {
             self.telemetry = matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
@@ -308,7 +354,10 @@ mod tests {
         );
         assert_eq!("nvidia".parse::<Provider>().unwrap(), Provider::Nvidia);
         assert_eq!("NVIDIA".parse::<Provider>().unwrap(), Provider::Nvidia);
-        assert!("ollama".parse::<Provider>().is_err());
+        assert_eq!("deepseek".parse::<Provider>().unwrap(), Provider::DeepSeek);
+        assert_eq!("local".parse::<Provider>().unwrap(), Provider::Local);
+        assert_eq!("ollama".parse::<Provider>().unwrap(), Provider::Local);
+        assert_eq!("generic".parse::<Provider>().unwrap(), Provider::Generic);
         assert!("bogus".parse::<Provider>().is_err());
     }
 
@@ -316,6 +365,9 @@ mod tests {
     fn provider_displays_lowercase() {
         assert_eq!(Provider::OpenRouter.to_string(), "openrouter");
         assert_eq!(Provider::Nvidia.to_string(), "nvidia");
+        assert_eq!(Provider::DeepSeek.to_string(), "deepseek");
+        assert_eq!(Provider::Local.to_string(), "local");
+        assert_eq!(Provider::Generic.to_string(), "generic");
     }
 
     #[serial]

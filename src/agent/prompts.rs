@@ -8,18 +8,22 @@ use crate::providers::client::ToolSpec;
 use super::context::RepoContext;
 
 /// Build the system prompt for the primary agent.
+///
+/// Layout is cache-aware: the stable prefix (identity, cwd, platform, rules,
+/// tool docs) must not change across turns so providers can hit prompt-cache.
+/// Volatile state (timestamp, git status) lives in the ephemeral suffix and in
+/// the newest user message instead.
 pub fn system_prompt(cwd: &Path, repo: &RepoContext, tools: &[ToolSpec]) -> String {
-    let mut prompt = base_prompt(cwd);
-    prompt.push_str(&git_section(repo));
-    prompt.push_str(&rules_section());
-    prompt.push_str(&tools_section(tools));
+    let mut prompt = stable_prefix(cwd, tools);
+    prompt.push_str(&ephemeral_suffix(repo));
     prompt
 }
 
 /// Build the system prompt for a sub-agent working under the orchestrator.
 ///
 /// Includes the agent's identity, its owned paths (write confinement), the
-/// SPEC it must implement, and the todo protocol (`todo` tool).
+/// SPEC it must implement, and the todo protocol (`todo` tool). Identity and
+/// owned paths are part of the stable prefix; repo state is ephemeral.
 pub fn agent_prompt(
     cwd: &Path,
     repo: &RepoContext,
@@ -29,8 +33,7 @@ pub fn agent_prompt(
     responsibilities: &[String],
     owned_paths: &[std::path::PathBuf],
 ) -> String {
-    let mut prompt = base_prompt(cwd);
-    prompt.push_str(&git_section(repo));
+    let mut prompt = stable_prefix(cwd, tools);
     prompt.push_str(&format!(
         "## Identity\n\
          You are the `{name}` sub-agent, role: {role}.\n\
@@ -61,29 +64,44 @@ pub fn agent_prompt(
          - When all your todos are done, give a final summary.\n\n",
     );
 
-    prompt.push_str(&rules_section());
-    prompt.push_str(&tools_section(tools));
+    // stable_prefix already contains rules + tools; identity/owned/plan are the
+    // only per-agent variance before the ephemeral suffix.
+    prompt.push_str(&ephemeral_suffix(repo));
     prompt
 }
 
-fn base_prompt(cwd: &Path) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    format!(
+/// Stable, cache-friendly prefix: identity + platform + rules + tool docs.
+/// Must not contain timestamps, git status, or anything that changes per turn.
+/// Tool docs are sorted by name so registry order never busts the cache.
+fn stable_prefix(cwd: &Path, tools: &[ToolSpec]) -> String {
+    let mut prompt = format!(
         "You are Dorean, an autonomous coding agent running on Linux.\n\
          You work directly in the user's repository and get things done:\n\
          inspect the code, make edits, run builds and tests, and report results.\n\n\
          - Working directory: {}\n\
          - Platform: {} ({})\n\
-         - Current unix timestamp: {now}\n\
          - Shell: sh (POSIX)\n\n",
         cwd.display(),
         std::env::consts::OS,
         std::env::consts::ARCH,
-    )
+    );
+    prompt.push_str(&rules_section());
+    prompt.push_str(&tools_section(tools));
+    prompt
+}
+
+/// Volatile suffix: timestamp (hour-rounded for cache stability) + repo state.
+/// Kept after the stable prefix so providers can prefix-cache everything above.
+fn ephemeral_suffix(repo: &RepoContext) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Round to the hour: per-second timestamps bust prompt caches every turn.
+    let hour = now / 3600 * 3600;
+    let mut text = format!("## Session\n- Current unix time (hour-rounded): {hour}\n\n");
+    text.push_str(&git_section(repo));
+    text
 }
 
 fn git_section(repo: &RepoContext) -> String {
@@ -124,8 +142,10 @@ fn rules_section() -> String {
 }
 
 fn tools_section(tools: &[ToolSpec]) -> String {
+    let mut sorted: Vec<&ToolSpec> = tools.iter().collect();
+    sorted.sort_by(|a, b| a.function.name.cmp(&b.function.name));
     let mut prompt = String::from("## Tools\n\n");
-    for spec in tools {
+    for spec in sorted {
         prompt.push_str(&format_tool_doc(spec));
     }
     prompt.push_str(

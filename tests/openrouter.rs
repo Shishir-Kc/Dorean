@@ -315,3 +315,62 @@ async fn agent_requires_key() {
     assert!(dorean::agent::run_once(&config, &options).await.is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Live-catalog shape (2026): extra top-level keys, per-entry metadata,
+/// `pricing.overrides` arrays, nulls, and extra pricing keys must not break
+/// parsing or `:free` detection.
+const MODELS_LIVE_SHAPE: &str = r#"{
+    "data": [
+        {
+            "id": "inception/mercury-2.5",
+            "canonical_slug": "inception/mercury-2.5",
+            "name": "Mercury",
+            "created": 1788890061,
+            "description": "fast",
+            "context_length": 262144,
+            "architecture": { "modality": "text", "tokenizer": "GPT" },
+            "pricing": { "prompt": "0.00001", "completion": "0.00005", "web_search": "0.01", "input_cache_read": "0.000001", "overrides": [] },
+            "top_provider": { "context_length": 262144, "is_moderated": true },
+            "per_request_limits": null,
+            "supported_voices": null
+        },
+        {
+            "id": "liquid/lfm-2.5-2.6b:free",
+            "canonical_slug": "liquid/lfm-2.5-2.6b",
+            "name": "Liquid: LFM (free)",
+            "created": 1788890061,
+            "description": "small free model",
+            "context_length": 32768,
+            "architecture": { "modality": "text" },
+            "pricing": { "prompt": "0", "completion": "0" },
+            "top_provider": { "context_length": 32768 },
+            "per_request_limits": null
+        },
+        {
+            "id": "openai/gpt-6-astra",
+            "name": "GPT Astra",
+            "description": "tiered pricing",
+            "context_length": 400000,
+            "pricing": { "prompt": "0.00001", "completion": "0.00005", "overrides": [{"min_prompt_tokens": 272000, "prompt": "0.00002", "completion": "0.000075"}] }
+        }
+    ],
+    "total_count": 3,
+    "links": { "next": null }
+}"#;
+
+#[tokio::test]
+async fn parses_live_shaped_catalog_and_detects_free() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(MODELS_LIVE_SHAPE))
+        .mount(&server)
+        .await;
+
+    let provider = OpenRouterProvider::with_base_url("sk-test", server.uri());
+    let models = provider.list_models().await.unwrap();
+    assert_eq!(models.len(), 3);
+    let free: Vec<_> = models.iter().filter(|m| m.is_free).collect();
+    assert_eq!(free.len(), 1);
+    assert_eq!(free[0].id, "liquid/lfm-2.5-2.6b:free");
+}
